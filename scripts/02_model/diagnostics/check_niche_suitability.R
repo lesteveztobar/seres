@@ -33,7 +33,7 @@
 # Usage: Rscript scripts/02_model/diagnostics/check_niche_suitability.R [site] [extra_species] [height_step]
 #   extra_species: comma-separated FinalID values to check even if never
 #   observed at this site (e.g. to preview a species_subset transplant —
-#   see run_colonization_onesite.R's species_file arg).
+#   see run_colonization.R's species_file arg).
 #   height_step: defaults to 0.25 (production resolution).
 #   e.g.: Rscript scripts/02_model/diagnostics/check_niche_suitability.R Maquipucuna SomeSpeciesFromMashpi
 # Lizeth Estévez Tobar — University of Bonn, 2026
@@ -52,7 +52,7 @@ if (!file.exists(niche_cache_path))
 niche_cache <- readRDS(niche_cache_path)
 
 # height_step defaults to 0.25 (production resolution, matches
-# run_colonization_onesite.R's manifest_suffix convention) -- NOT the
+# run_colonization.R's manifest_suffix convention) -- NOT the
 # unsuffixed 0.1m file, which most sites don't even have.
 manifest_suffix <- if (height_step != 0.1) sprintf("_h%.2f", height_step) else ""
 microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site_name, manifest_suffix))

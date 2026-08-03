@@ -1,6 +1,6 @@
 #!/bin/bash
 # check_colonization_progress.sh — snapshot progress of a colonization
-# run_colonization_onesite.R job (single run or sweep) from its log file.
+# run_colonization.R job (single run or sweep) from its log file.
 # Read-only — safe to run any time, no module load needed.
 #
 # Usage: sh scripts/02_model/diagnostics/check_colonization_progress.sh <site> <exp_tag>

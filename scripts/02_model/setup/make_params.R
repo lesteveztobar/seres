@@ -37,7 +37,7 @@ params_ppoll <- list(
     # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
     p_poll  = c(0.05, 0.15, 0.30, 0.50, 0.70),  p_germ  = 0.001,  p_s1 = 0.45,
     # ── d(x'|x): dispersal ────────────────────────────────────────────────
-    # canopy_z omitted — it's site-specific and run_colonization_onesite.R
+    # canopy_z omitted — it's site-specific and run_colonization.R
     # always overwrites it with the per-site mean canopy height.
     lambda = 1,  Ut = 1,
     # ── spin-up ────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ params_beta0A <- list(
     # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
     p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
     # ── d(x'|x): dispersal ──────────────────────────────────────────────
-    # canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+    # canopy_z omitted — site-specific, overwritten by run_colonization.R
     lambda = 1,  Ut = 1,
     n_founders = N_FOUNDERS_DEFAULT
 )
@@ -88,7 +88,7 @@ cost_repro   =  0.50,
 # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
 p_poll  = 0.30,  p_germ  = c(0.0001, 0.0005, 0.001, 0.003, 0.005),  p_s1 = 0.45,
 # ── d(x'|x): dispersal ──────────────────────────────────────────────
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT
 )
@@ -111,7 +111,7 @@ cost_repro   =  c(0.20, 0.40, 0.60, 0.80, 1.00),
 # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
 p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
 # ── d(x'|x): dispersal ──────────────────────────────────────────────
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT
 )
@@ -134,7 +134,7 @@ cost_repro   =  0.50,
 # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
 p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
 # ── d(x'|x): dispersal ──────────────────────────────────────────────
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT
 )
@@ -157,7 +157,7 @@ cost_repro   =  0.50,
 # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
 p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
 # ── d(x'|x): dispersal ──────────────────────────────────────────────
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT
 )
@@ -186,7 +186,7 @@ beta_precip  =  3e-4,  beta_rh      =  0.010,
 sigma        =  0.10,  delta_s_base =  0.80,
 cost_repro   =  0.50,
 p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = seq(5, 100, by = 5)
 )
@@ -232,7 +232,7 @@ cost_repro   =  0.50,
 p_poll  = c(0.05, 0.15, 0.30, 0.50, 0.70),
 p_germ  = c(0.0001, 0.0005, 0.001, 0.003, 0.005),
 p_s1    = c(0.15, 0.30, 0.45, 0.60, 0.75),
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = c(50, 100, 200, 400, 800)
 )
@@ -285,7 +285,7 @@ cost_repro   =  0.50,
 p_poll  = c(0.15, 0.30, 0.50, 0.70, 0.90),
 p_germ  = c(0.0001, 0.0005, 0.001, 0.005, 0.01),
 p_s1    = c(0.15, 0.30, 0.45, 0.60, 0.90),
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = c(10, 30, 100, 300, 1000)
 )
@@ -326,7 +326,7 @@ cost_repro   =  0.50,
 p_poll  = c(0.30, 0.45, 0.60, 0.75, 0.90),
 p_germ  = c(0.00100, 0.00325, 0.00550, 0.00775, 0.01000),
 p_s1    = c(0.450, 0.563, 0.675, 0.788, 0.900),
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = c(30, 273, 515, 758, 1000)
 )
@@ -353,7 +353,7 @@ beta_precip  =  1e-3,  beta_rh      =  0.040,          # max tested (best growth
 sigma        =  0.10,  delta_s_base =  0.80,
 cost_repro   =  0.20,                                   # min tested (least reproduction cost)
 p_poll  = 0.90,  p_germ  = 0.01,  p_s1 = 0.90,           # beyond anything tested so far
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = 1000,                                       # beyond the 800 max tested
 n_reps     = 5
@@ -366,7 +366,7 @@ saveRDS(params_bestcase, out_path)
 # The complement to best_case.rds: same structure (n_reps replicates via
 # run_replicated(), for the same stochastic-bad-luck reasons noted above),
 # but every value held at its literature-calibrated default -- i.e. the exact
-# fallback params run_colonization_onesite.R uses when no params_file is
+# fallback params run_colonization.R uses when no params_file is
 # given. best_case answers "can the model persist under the most generous
 # corner of the tested space?"; realistic answers "does it persist under the
 # values the model is actually calibrated to?" Comparing the two tells us
@@ -384,7 +384,7 @@ beta_precip  =  3e-4,  beta_rh      =  0.010,
 sigma        =  0.10,  delta_s_base =  0.80,
 cost_repro   =  0.50,
 p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+# canopy_z omitted — site-specific, overwritten by run_colonization.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT,
 n_reps     = 5

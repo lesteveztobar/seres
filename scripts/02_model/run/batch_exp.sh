@@ -1,6 +1,6 @@
 #!/bin/bash
 # batch_exp.sh — submit one sensitivity-experiment job per site to the Marvin cluster
-# Each job sweeps one parameter (5 values, handled inside run_colonization_onesite.R)
+# Each job sweeps one parameter (5 values, handled inside run_colonization.R)
 # across all timesteps for one site. SITES x EXP = 5 x 9 = 45 jobs.
 #
 # RECOMMENDED ORDER: run founder_number for one site alone first (e.g.
@@ -10,7 +10,7 @@
 # fixed. Once found, update N_FOUNDERS_DEFAULT in make_params.R, re-run it,
 # and only then submit the rest (including via this script).
 #
-# run_colonization_onesite.R also takes an optional 4th arg, height_step
+# run_colonization.R also takes an optional 4th arg, height_step
 # (microenv resolution to run at — must already exist), e.g.
 #   sbatch scripts/02_model/run/run_colonization.sh Maquipucuna "$(pwd)/data/params/n_founders.rds" founder_number 0.25
 # Defaults to 0.25 (production resolution) if omitted — every job below runs

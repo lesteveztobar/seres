@@ -27,15 +27,19 @@ OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV",
   unset = file.path(CSV_DIR, "combined_with_identification.csv")
 )
 
-# Loads OBSERVATIONS_CSV and falls FinalID back to Identification wherever
-# FinalID is NA (2026-07-24: combined_with_identification.csv leaves
-# FinalID entirely unpopulated on every row -- species IDs live in
-# Identification instead, pending manual review/promotion into FinalID,
-# same as every prior field-data drop; without this fallback,
-# characterize_niches.R and everything downstream finds zero usable
-# observations at any site, not just the newly added ones -- see the
-# 2026-07-24 characterize_niches.sh failure). NOTE: this feeds
-# Identification's guesses -- including ones Confidence marks
+# Loads OBSERVATIONS_CSV and populates FinalID from Identification
+# (2026-07-24: combined_with_identification.csv leaves FinalID entirely
+# unpopulated on every row -- species IDs live in Identification instead,
+# pending manual review/promotion into FinalID, same as every prior
+# field-data drop; without this, characterize_niches.R and everything
+# downstream finds zero usable observations at any site, not just the
+# newly added ones -- see the 2026-07-24 characterize_niches.sh failure).
+# Rows where Identification is itself blank/NA (e.g. LaElenita: no photo,
+# or photo pending review) get a hardcoded default of "Maxillaria
+# acutifolia" rather than being left blank, which otherwise silently
+# produces a species with an empty-string ID downstream. This default is
+# applied only in memory here, never written back to the CSV. NOTE: this
+# feeds Identification's guesses -- including ones Confidence marks
 # "unverified"/AI-only -- directly into species-level niche and
 # colonization modeling. If combinedv3.csv-quality curation matters more
 # than the extra sites, override with CANOPY_OBS_CSV=data/csv/combinedv3.csv
@@ -43,9 +47,10 @@ OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV",
 load_observations <- function(path = OBSERVATIONS_CSV) {
   niches <- read.csv(path)
   if ("Identification" %in% names(niches)) {
-    needs_fallback <- is.na(niches$FinalID) | !nzchar(trimws(niches$FinalID))
-    niches$FinalID[needs_fallback] <- niches$Identification[needs_fallback]
+    niches$FinalID <- niches$Identification
   }
+  needs_default <- is.na(niches$FinalID) | !nzchar(trimws(niches$FinalID))
+  niches$FinalID[needs_default] <- "Maxillaria acutifolia"
   niches
 }
 

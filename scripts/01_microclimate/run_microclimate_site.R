@@ -174,10 +174,22 @@ if (length(valid_mp) == 0) stop("All grid cells failed in runpointmodela — che
 model <- lapply(model, function(x) if (inherits(x, "micropoint")) x else valid_mp[[1]])
 log_msg(sprintf("Valid grid cells: %d / %d", length(valid_mp), n_before))
 
-log_msg("Subsetting point model to monthly max/min days...")
-micropoint_mx <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmax")
-micropoint_mn <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmin")
-
+# Full-year exhaustive simulation: runmicro() runs directly on the complete,
+# unsubsetted point model (every hourly timestep of the tme window built
+# above) -- no subsetpointmodela() step. runmicro() attaches real timestamps
+# to its own output (mout$tme, taken from the point model's tmeorig -- see
+# .runmicronosnow / runpointmodel in microclimf), so no positional month/day
+# inference is needed downstream; every hourly slice carries its actual
+# POSIXct timestamp through to the saved object.
+#
+# Only the 5 variables lookup_climate_by_height()/get_clim_voxel() (get_colonization.R)
+# actually read -- Tz, relhum, windspeed, Rdirdown, Rdifdown -- are requested
+# via `out`, roughly halving storage/serialization (tleaf, soilm, Rlwdown,
+# Rswup, Rlwup are computed internally but never written to disk).
+OUT_VARS <- c(
+  Tz = TRUE, tleaf = FALSE, relhum = TRUE, soilm = FALSE, windspeed = TRUE,
+  Rdirdown = TRUE, Rdifdown = TRUE, Rlwdown = FALSE, Rswup = FALSE, Rlwup = FALSE
+)
 
 # The model's height ceiling must be the canopy top, not the tallest
 # recorded epiphyte observation (site$hObs_max) — the latter only reflects
@@ -245,17 +257,29 @@ parallel::mclapply(seq_along(heights), function(i) {
     .wlog(sprintf("[%d/%d] %.2f m — skipped.", i, n_heights, h))
     return(invisible(NULL))
   }
-  .wlog(sprintf("[%d/%d] %.2f m — starting...", i, n_heights, h))
+  .wlog(sprintf("[%d/%d] %.2f m — starting runmicro (full year)...", i, n_heights, h))
   dtm_  <- terra::unwrap(dtmdata_w)
   dtmc_ <- terra::unwrap(dtmc_w)
-  mout_mx <- microclimf::runmicro(micropoint = micropoint_mx, reqhgt = h,
+  mout <- microclimf::runmicro(micropoint = model, reqhgt = h,
     vegp = vegetationdata, soilc = soildata, dtm = dtm_, dtmc = dtmc_,
-    altcorrect = 1, method = "R")
-  mout_mn <- microclimf::runmicro(micropoint = micropoint_mn, reqhgt = h,
-    vegp = vegetationdata, soilc = soildata, dtm = dtm_, dtmc = dtmc_,
-    altcorrect = 1, method = "R")
-  saveRDS(list(tmax = mout_mx, tmin = mout_mn), h_rds_path)
-  .wlog(sprintf("[%d/%d] %.2f m — done.", i, n_heights, h))
+    altcorrect = 1, method = "R", out = unname(OUT_VARS))
+  # One shared timestamp vector per height-tier output (mout$tme, a POSIXct
+  # vector of length ntime, attached natively by runmicro()) -- not
+  # duplicated per variable, since Tz/relhum/windspeed/Rdirdown/Rdifdown all
+  # share the same time axis and length.
+  saveRDS(
+    list(
+      tme       = mout$tme,
+      Tz        = mout$Tz,
+      relhum    = mout$relhum,
+      windspeed = mout$windspeed,
+      Rdirdown  = mout$Rdirdown,
+      Rdifdown  = mout$Rdifdown
+    ),
+    h_rds_path
+  )
+  .wlog(sprintf("[%d/%d] %.2f m — done. %d timesteps, %s .. %s.",
+                i, n_heights, h, length(mout$tme), format(min(mout$tme)), format(max(mout$tme))))
   invisible(NULL)
 }, mc.cores = n_cores)
 
@@ -288,7 +312,18 @@ log_msg("Saving microenv manifest...")
 manifest <- list(
   .heights    = heights_ok,
   .height_dir = height_dir,
-  .spatial    = list(ext = terra::ext(dtmdata), crs = terra::crs(dtmdata)),
+  # Extent stored as a plain numeric vector (not a raw terra::ext() S4 object)
+  # -- a SpatExtent's only slot is a C++ pointer that does not survive
+  # saveRDS()/readRDS() across sessions (raises "NULL value passed as symbol
+  # address" on reload) unless wrapped with terra::wrap(), which SpatExtent
+  # objects don't support. terra::crs() already returns a plain character
+  # (WKT) string, so it round-trips fine as-is.
+  .spatial    = list(
+    ext  = as.vector(terra::ext(dtmdata)),
+    nrow = terra::nrow(dtmdata),
+    ncol = terra::ncol(dtmdata),
+    crs  = terra::crs(dtmdata)
+  ),
   .weather    = model[[1]]$weather
 )
 saveRDS(manifest, site_env_path)

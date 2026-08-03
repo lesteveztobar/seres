@@ -59,7 +59,7 @@
 #      existing realistic_h0.25 results for Mashpi/MindoTarabita are stale
 #      relative to step 1's fixed species list anyway). Depends on step 1.
 #   5. Isolation runs, one per (site, species) pair -- each site's species
-#      run ALONE (species_subset, see run_colonization_onesite.R), same
+#      run ALONE (species_subset, see run_colonization.R), same
 #      realistic_273founders.rds params as step 4 so species_subset is the
 #      only thing that differs. Depends on step 1.
 #   6. competition_analysis.R -- compares each species' realized height
@@ -222,7 +222,7 @@ if [ "${#CLIMVAR_DEPS[@]}" -gt 0 ]; then
 else
   CLIMVAR_DEP_ARG=""
 fi
-  # --cpus-per-task=32 added 2026-07-27: get_clim() read each height tier
+  # --cpus-per-task=32 added 2026-07-27: lookup_climate_by_height() read each height tier
   # sequentially/single-threaded -- even after bumping --time 02:00:00 ->
   # 06:00:00, the job still hit its own time limit a second time (died on
   # Saloya, 5 sites in). Root cause wasn't the time budget, it was zero

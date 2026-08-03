@@ -30,7 +30,7 @@ if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
 
 log_msg <- function(msg) message("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
 
-# ── Site setup (mirrors run_colonization_onesite.R) ─────────────────────────────
+# ── Site setup (mirrors run_colonization.R) ─────────────────────────────
 niches <- load_observations()
 niches <- niches[
   !is.na(niches$lat) & !is.na(niches$lon) &

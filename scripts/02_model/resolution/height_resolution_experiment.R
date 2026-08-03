@@ -45,7 +45,7 @@ height_steps <- if (length(args) >= 2 && nzchar(args[2])) as.numeric(strsplit(ar
 params_file  <- if (length(args) >= 3 && nzchar(args[3])) args[3] else file.path(PARAMS_DIR, "realistic.rds")
 params_tag   <- tools::file_path_sans_ext(basename(params_file))
 
-TIMESTEPS  <- 50  # matches production run_colonization_onesite.R (RUN_TIMESTEPS, raised from 30 2026-07-24)
+TIMESTEPS  <- 50  # matches production run_colonization.R (RUN_TIMESTEPS, raised from 30 2026-07-24)
 SPINUP     <- 5
 RESOLUTION <- 10  # fixed -- isolates height-resolution effect only
 
@@ -54,7 +54,7 @@ if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
 
 log_msg <- function(msg) message("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
 
-# ── Site setup (mirrors run_colonization_onesite.R) ─────────────────────────
+# ── Site setup (mirrors run_colonization.R) ─────────────────────────
 niches <- load_observations()
 niches <- niches[
   !is.na(niches$lat) & !is.na(niches$lon) &

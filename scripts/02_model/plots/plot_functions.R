@@ -152,7 +152,7 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
 # forestparams mean height/crown radius (deterministic, not a stochastic
 # draw), at fine continuous resolution, purely to visualize the geometry the
 # methods text describes. Defaults match the forestparams list used
-# everywhere else (run_colonization_onesite.R etc.); pass a different list to
+# everywhere else (run_colonization.R etc.); pass a different list to
 # match a different site/config if that ever stops being shared across sites
 # (see methods.tex, Landscape and forest structure, on why it's shared now).
 plot_tree_diagram <- function(forestparams = list(mean_hgt = 8.4, mean_crown_r = 2.0,
@@ -233,7 +233,7 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
                                       processed_dir = PROCESSED_DIR,
                                       height_step = 0.25) {
   # height_step defaults to 0.25 (the production resolution used everywhere
-  # else in this pipeline -- run_colonization_onesite.R, characterize_niches.R
+  # else in this pipeline -- run_colonization.R, characterize_niches.R
   # -- via the same manifest_suffix convention), NOT the unsuffixed 0.1m file.
   # 2026-07-17: this function used to hardcode the unsuffixed name, which only
   # Maquipucuna happens to have (and at ~2.5x more height tiers than the
@@ -259,7 +259,10 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   # boxplot) only ever needs the time-averaged 2D Tz layer per height, so
   # reduce immediately on load and keep only that (tiny) result.
   tz_layers <- lapply(heights_m, function(hgt) {
-    r <- load_height(env, hgt)$tmax$Tz
+    h <- load_height(env, hgt)
+    # New format (h$tme present, full-year rewrite): Tz sits at the top
+    # level, no tmax/tmin day-type split. Old format: nested under $tmax.
+    r <- if (!is.null(h$tme)) h$Tz else h$tmax$Tz
     if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
   })
   vol_tmax <- abind::abind(tz_layers, along = 3)
@@ -269,9 +272,11 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   nheight <- dim(vol_tmax)[3]
 
   if (!is.null(env$.spatial)) {
+    # .spatial$ext is a plain named numeric vector (xmin/xmax/ymin/ymax), not
+    # a terra::ext() S4 object -- see run_microclimate_site.R for why.
     e        <- env$.spatial$ext
-    x_coords <- seq(e$xmin, e$xmax, length.out = ncol_r)
-    y_coords <- seq(e$ymax, e$ymin, length.out = nrow_r)  # north→south
+    x_coords <- seq(e[["xmin"]], e[["xmax"]], length.out = ncol_r)
+    y_coords <- seq(e[["ymax"]], e[["ymin"]], length.out = nrow_r)  # north→south
     x_lab <- "Longitude"; y_lab <- "Latitude"
   } else {
     x_coords <- seq_len(ncol_r)
@@ -501,7 +506,7 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
 }
 
 # ── Colonization sensitivity-experiment sweeps ──────────────────────────────────
-# One RDS per site x experiment tag, produced by run_colonization_onesite.R
+# One RDS per site x experiment tag, produced by run_colonization.R
 # via batch_exp.sh. This mapping must stay in sync with the EXP/PARAMS
 # pairing in scripts/batch_exp.sh.
 EXP_PARAM_MAP <- c(
@@ -665,7 +670,7 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
 # that species, so the ceiling rescale is doing real work.
 #
 # extra_species: species to include even if never observed at this site
-# (e.g. to preview a species_subset transplant — see run_colonization_onesite.R's
+# (e.g. to preview a species_subset transplant — see run_colonization.R's
 # species_file arg). Falls back to this landscape's own best-available height
 # as the ceiling instead of a local observed presence — see niche_ceiling().
 # context: pass a pre-built .niche_plot_context() to skip rebuilding the

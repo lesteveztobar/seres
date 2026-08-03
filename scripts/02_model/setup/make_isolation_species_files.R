@@ -1,6 +1,6 @@
 # make_isolation_species_files.R
 # Builds one params$species_subset RDS per (site, species) pair -- see
-# run_colonization_onesite.R's species_file arg / init_colonization()'s
+# run_colonization.R's species_file arg / init_colonization()'s
 # params$species_subset (get_colonization.R) -- so each species can be run
 # alone (no competitors) and compared against the existing multi-species run
 # for the same site, for the competition/microhabitat-preference isolation
@@ -20,6 +20,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
+
 
 niches <- load_observations()
 niches <- niches[!is.na(niches$lat) & !is.na(niches$lon) &

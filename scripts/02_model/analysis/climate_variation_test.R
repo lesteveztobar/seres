@@ -142,14 +142,14 @@ for (site in SITES) {
   # (which deliberately drops night hours, see .niche_var_mean() in
   # get_colonization.R), here we want the full diurnal distribution actually
   # sampled at each height, not a daytime-only summary.
-  # Parallel, not sequential: each get_clim() call reads one independent
-  # per-height file from scratch (see load_height()), same as
+  # Parallel, not sequential: each lookup_climate_by_height() call reads one
+  # independent per-height file from scratch (see load_height()), same as
   # build_clim_cache() (get_colonization.R) -- this loop hit its own SLURM
   # time limit on 2026-07-27 running single-threaded on sites with 100-400+
   # height tiers.
   n_cores <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = 1L)))
   px <- do.call(rbind, parallel::mclapply(heights, function(h) {
-    cl <- get_clim(h, microenv)
+    cl <- lookup_climate_by_height(h, microenv)
     if (is.null(cl)) return(NULL)
     data.frame(height = h, temp = cl$temp, relhum = cl$relhum, swdown = cl$swdown)
   }, mc.cores = n_cores))

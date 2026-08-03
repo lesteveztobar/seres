@@ -26,7 +26,7 @@
 #
 # Every site is modeled with just the species actually observed there (no
 # species_file arg passed to run_colonization.sh) -- see
-# run_colonization_onesite.R's species_file/params$species_subset for how to
+# run_colonization.R's species_file/params$species_subset for how to
 # override that.
 #
 # If a step fails partway through, whatever ran before it still has valid

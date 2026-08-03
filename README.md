@@ -36,7 +36,6 @@ GeoJSON field exports
   data/csv/combined_with_identification.csv  # merged dataset, all 7 sites (combinedv3.csv remains
                                       # available as a manual override for curation-quality work; see Notes)
         ↓
-  scripts/01_microclimate/run_microclimate.R          # interactive: all sites sequentially
   scripts/01_microclimate/run_microclimate_site.R     # HPC: single site via Rscript / SLURM
     └── scripts/01_microclimate/lib.R                 # ERA5/DTM/LAI/albedo/vegetation/soil acquisition +
                                       #   niche extraction, canopy grid, climate lookups, runpointmodela()
@@ -135,10 +134,9 @@ canopymicroenv/
 │   │
 │   │   # ── Stage 1: microclimate pipeline ──────────────────────────────
 │   ├── 01_microclimate/
-│   │   ├── run.sh                     # dispatcher: interactive / site / progress / fix-dtm /
+│   │   ├── run_microclimate.sh        # dispatcher: site / progress / fix-dtm /
 │   │   │                              #   submit-site / submit-array
-│   │   ├── run_microclimate.R         # data acquisition + point model + grid model (interactive)
-│   │   ├── run_microclimate_site.R    # same, single site — called by SLURM
+│   │   ├── run_microclimate_site.R    # data acquisition + point model + grid model, single site — called by SLURM
 │   │   ├── lib.R                      # ERA5/DTM/LAI/albedo/vegetation/soil acquisition +
 │   │   │                              #   niche extraction, canopy grid, climate lookups, get_clim()
 │   │   ├── check_microenv_progress.R  # read-only: per-site/height-step regen progress
