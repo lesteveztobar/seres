@@ -40,6 +40,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/03_orchestration/lib.sh
 
 # Master observations CSV -- mirrors paths.R's OBSERVATIONS_CSV (same
 # CANOPY_OBS_CSV override, same default). SITES is derived from it rather
@@ -53,12 +54,6 @@ mkdir -p logs
 MANIFEST="logs/persistence_all_sites_$(date +%Y%m%d_%H%M%S).jobs"
 : > "$MANIFEST"
 ALL_IDS=()
-
-join_dep() {
-  local out="afterok"
-  for id in "$@"; do out="$out:$id"; done
-  echo "$out"
-}
 
 echo "== Step 1: niche characterization + params regen (once, shared by every site) =="
 NICHE_ID=$(sbatch --parsable scripts/02_model/setup/characterize_niches.sh "$HEIGHT_STEP")

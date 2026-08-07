@@ -13,4 +13,4 @@ module purge
 module load R
 
 cd /home/s38leste_hpc/canopymicroenv
-Rscript scripts/02_model/tests/test.R --compare
+Rscript scripts/tests/test.R --compare

@@ -29,6 +29,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/03_orchestration/lib.sh
 
 # Master observations CSV -- mirrors paths.R's OBSERVATIONS_CSV (same
 # CANOPY_OBS_CSV override, same default). Keep the two in sync if either
@@ -94,12 +95,6 @@ mkdir -p logs
 MANIFEST="logs/pipeline_$(date +%Y%m%d_%H%M%S).jobs"
 : > "$MANIFEST"
 DEP=()   # job IDs the *next* step must wait on
-
-join_dep() {
-  local out="afterok"
-  for id in "$@"; do out="$out:$id"; done
-  echo "$out"
-}
 
 for step in "${STEPS[@]}"; do
   DEP_ARG=()

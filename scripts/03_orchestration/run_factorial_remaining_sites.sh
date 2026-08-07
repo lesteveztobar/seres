@@ -42,6 +42,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/03_orchestration/lib.sh
 
 SITES=("Mashpi" "MindoTarabita")
 HEIGHT_STEP=${HEIGHT_STEP:-0.25}
@@ -57,12 +58,6 @@ mkdir -p logs
 MANIFEST="logs/factorial_remaining_sites_$(date +%Y%m%d_%H%M%S).jobs"
 : > "$MANIFEST"
 ALL_IDS=()
-
-join_dep() {
-  local out="afterok"
-  for id in "$@"; do out="$out:$id"; done
-  echo "$out"
-}
 
 echo "== Reproduction factorial (v3) per site, one site at a time =="
 PREV_DEPS=()

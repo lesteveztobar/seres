@@ -5,6 +5,24 @@
 # regenerate_missing_dtm.R, and scripts/legacy/allsites.R.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Worker logging ────────────────────────────────────────────────────────────
+
+# Returns a closure that timestamps `msg` and appends it to `log_file` — used
+# by mclapply worker loops to log to a shared file without every worker
+# opening its own connection. Set with_pid = TRUE to prefix the worker's PID,
+# which matters when several workers write to the same log concurrently
+# (e.g. the diag_wrap_*.R scripts); the main production height loop in
+# run_microclimate_site.R logs without it. Formerly copy-pasted as a local
+# .wlog() in run_microclimate_site.R, diag_wrap_collision.R, and
+# diag_wrap_method_test.R — consolidated here.
+wlog <- function(log_file, with_pid = FALSE) {
+  tag <- if (with_pid) sprintf("[worker pid=%d]", Sys.getpid()) else "[worker]"
+  function(msg) {
+    stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "]", tag, " ", msg)
+    cat(stamped, "\n", file = log_file, append = TRUE)
+  }
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Part 1: data acquisition (formerly get_climateinputs.R)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -13,44 +31,6 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 
 # ── Site preparation ──────────────────────────────────────────────────────────
-
-# Reads the combined CSV and derives a single-row site summary with:
-# - bounding box (lat/lon min/max) for ERA5 and raster construction
-# - time window (tme_start/tme_end) for ERA5 request
-# - observed height range (hObs_min/hObs_max) for model height sequence
-make_site <- function(csv_path) {
-  message("Reading combined CSV...")
-  df <- read_csv(csv_path,
-                 na        = c("", "NA", "N/A"),
-                 col_types = COMBINED_COL_TYPES) |>
-    dplyr::filter(!is.na(Source), !is.na(Area_or_Site))
-
-  time_windows <- df |>
-    dplyr::filter(!is.na(datetime)) |>
-    dplyr::mutate(datetime = as.POSIXlt(datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")) |>
-    dplyr::summarise(
-      tme_start = min(datetime),
-      tme_end   = max(datetime),
-      hObs_min  = min(Height_m, na.rm = TRUE),
-      hObs_max  = max(Height_m, na.rm = TRUE),
-      .groups   = "drop"
-    )
-
-  coord_windows <- df |>
-    dplyr::filter(!is.na(lat), !is.na(lon)) |>
-    dplyr::mutate(lat = as.numeric(lat), lon = as.numeric(lon)) |>
-    dplyr::summarise(
-      lat_min = min(lat), lat_max = max(lat),
-      lon_min = min(lon), lon_max = max(lon),
-      .groups = "drop"
-    )
-
-  site <- dplyr::bind_cols(data.frame(Site = "AllSites"), coord_windows, time_windows)
-  message("Site created: AllSites | lon [", round(site$lon_min, 3), ", ", round(site$lon_max, 3),
-          "] lat [", round(site$lat_min, 3), ", ", round(site$lat_max, 3), "]")
-  message("Time window: ", format(site$tme_start), " to ", format(site$tme_end))
-  return(site)
-}
 
 # Reads the combined CSV and derives a per-site summary dataframe with one row
 # per field site (Area_or_Site), each with:
@@ -96,10 +76,23 @@ make_sites <- function(csv_path, pad = 0.01) {
 
 # ── ERA5 data acquisition ─────────────────────────────────────────────────────
 
-# Concatenates a list of per-year merged ERA5 nc files along the time dimension.
-# All files must share the same spatial grid and variables (produced by
-# merge_era5_steptype_files). Used when the requested time window spans more
-# than one calendar year.
+# ERA5 processing utilities. Restored 2026-08-08 after an in-progress cleanup
+# deleted these along with make_site()/get_clim()/get_clim_month()/
+# get_canopy_grid() but left get_weather() (below) still calling three of
+# them -- concat_era5_nc(), fix_lsm(), .download_era5_months() -- which broke
+# get_weather() for any site needing a fresh/extended ERA5 download.
+# .download_era5_months() also calls merge_era5_steptype_files(), a fourth
+# dependency not directly referenced by get_weather() itself, so it is
+# restored here too even though it wasn't named in the original deletion
+# report. Order below is dependency order: concat_era5_nc and
+# merge_era5_steptype_files are leaf utilities; fix_lsm is used by both
+# .download_era5_months and get_weather; .download_era5_months is get_weather's
+# direct dependency.
+
+# Concatenates per-month ERA5 nc files into one multi-month file along the
+# time dimension. All files must share the same spatial grid and variables
+# (produced by merge_era5_steptype_files). Used when the requested time
+# window spans more than one calendar year.
 concat_era5_nc <- function(infiles, outfile) {
   library(ncdf4)
   message("Concatenating ", length(infiles), " ERA5 yearly nc files...")
@@ -704,103 +697,4 @@ get_soil <- function(r, dir, landcover, refldata) {
 
   message("soilcharac ready")
   return(soildata)
-}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Part 2: niche extraction, canopy grid, climate lookups (formerly get_microenv.R)
-# ═══════════════════════════════════════════════════════════════════════════
-# get_microenv.R
-# Microenvironment input into model
-# Lizeth Estévez Tobar — University of Bonn, 2026
-# Retrieves hourly weather data for a given height and site from the models list.
-# Used as the primary microclimate lookup inside all submodel functions.
-# Returns the full weather dataframe (672 rows × 10 columns) for the height step
-# nearest to the requested height.
-
-# TODO: match to nearest ERA5 cell for [x,y] position rather than always
-#       using first valid cell — adequate for prototype
-get_clim <- function(site_name, height, models, valid_per_model) {
-  h_key  <- sprintf("%s_h%.1f", site_name, height)
-  cell_c <- valid_per_model[[h_key]][1]
-  if (is.null(cell_c) || is.na(cell_c)) return(NULL)
-  models[[h_key]][[cell_c]]$weather
-}
-
-# Extracts a monthly slice of hourly weather data.
-# Divides the 672-hour weather dataframe into 12 equal chunks of 56 hours.
-# TODO: replace with real calendar month slicing once annual ERA5 data available
-get_clim_month <- function(clim, month) {
-  if (is.null(clim) || nrow(clim) == 0) {
-    return(NULL)
-  }
-  hours_per_month <- floor(nrow(clim) / 12)
-  month_hours <- ((month - 1) * hours_per_month + 1):(month * hours_per_month)
-  month_hours <- month_hours[month_hours <= nrow(clim)]
-  clim[month_hours, ]
-}
-# Downloads ETH Global Canopy Height 2020 (Lang et al.) for the site extent
-# via Google Earth Engine and resamples to simulation resolution.
-# Returns a [xDim × yDim] numeric matrix of canopy heights in metres.
-# Source: ETH GlobalCanopyHeight_2020_10m_v1 (users/nlang/...)
-# References: Lang et al. 2023
-get_canopy_grid <- function(site, xDim, yDim, resolution, out_dir,
-                            google_drive_folder = "rgee_backup") {
-  cache_file <- file.path(out_dir, paste0(site$Site, "_canopy_grid.rds"))
-  if (file.exists(cache_file)) {
-    message("Canopy grid cache found, loading...")
-    return(readRDS(cache_file))
-  }
-  
-  message("Downloading canopy height raster from GEE...")
-  e <- c(site$lon_min, site$lat_min, site$lon_max, site$lat_max)
-  aoi <- ee$Geometry$Rectangle(e)
-  img <- ee$Image("users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1")$
-    select("b1")$clip(aoi)
-  
-  # Check Drive first — skip export if already there
-  googledrive::drive_auth(email = "lizethestevezt@gmail.com", cache = "~/.secrets")
-  folder <- googledrive::drive_find(pattern = google_drive_folder, type = "folder", n_max = 1)
-  drive_files <- googledrive::drive_ls(folder)
-  drive_file <- drive_files[grepl("canopy_height", drive_files$name), ]
-  
-  if (nrow(drive_file) == 0) {
-    message("Exporting canopy height to Drive...")
-    task <- ee$batch$Export$image$toDrive(
-      image          = img,
-      description    = "canopy_height_export",
-      folder         = google_drive_folder,
-      fileNamePrefix = paste0(site$Site, "_canopy_height"),
-      region         = aoi$bounds()$getInfo()$coordinates[[1]],
-      scale          = resolution,
-      crs            = "EPSG:4326"
-    )
-    task$start()
-    rgee::ee_monitoring(task, max_attempts = 200, quiet = FALSE)
-    drive_files <- googledrive::drive_ls(folder)
-    drive_file <- drive_files[grepl("canopy_height", drive_files$name), ]
-  } else {
-    message("Canopy height found on Drive, downloading...")
-  }
-  
-  tmp_path <- tempfile(fileext = ".tif")
-  googledrive::drive_download(file = drive_file[1, ], path = tmp_path, overwrite = TRUE)
-  canopy_rast <- terra::rast(tmp_path)
-  
-  target_rast <- terra::rast(
-    nrows = yDim, ncols = xDim,
-    xmin = site$lon_min, xmax = site$lon_max,
-    ymin = site$lat_min, ymax = site$lat_max,
-    crs = "EPSG:4326"
-  )
-  canopy_rast <- terra::resample(canopy_rast, target_rast, method = "bilinear")
-  
-  canopy_mat <- t(as.matrix(canopy_rast, wide = TRUE))
-  canopy_mat[is.na(canopy_mat)] <- median(canopy_mat, na.rm = TRUE)
-  
-  saveRDS(canopy_mat, cache_file)
-  message(
-    "Canopy grid saved: ", xDim, " × ", yDim, " cells, range ",
-    round(min(canopy_mat)), "–", round(max(canopy_mat)), "m"
-  )
-  return(canopy_mat)
 }

@@ -116,6 +116,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/03_orchestration/lib.sh
 
 # Master observations CSV -- mirrors paths.R's OBSERVATIONS_CSV (same
 # CANOPY_OBS_CSV override, same default). Keep the two in sync if either
@@ -140,7 +141,6 @@ MANIFEST="logs/full_pipeline_$(date +%Y%m%d_%H%M%S).jobs"
 : > "$MANIFEST"
 ALL_IDS=()
 
-join_dep() { local out="afterok"; for id in "$@"; do out="$out:$id"; done; echo "$out"; }
 # afterany: for aggregation steps specifically written to tolerate missing
 # inputs (competition_analysis.R, run_plots.sh's safe_plot(),
 # summarize_all_results.R -- all check file.exists()/skip gracefully rather
