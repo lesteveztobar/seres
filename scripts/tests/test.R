@@ -2,12 +2,8 @@ opts <- options(stringsAsFactors = FALSE)
 
 timestamp <- function() format(Sys.time(), "%Y-%m-%d %H:%M:%S")
 
-log_msg <- function(...) {
-    msg <- paste(..., collapse = "")
-    cat(sprintf("[%s] %s\n", timestamp(), msg), file = stdout())
-    if (interactive()) flush.console()
-    flush(stdout())
-}
+source("scripts/02_model/lib_logging.R")
+log_msg <- make_log_msg(timestamp_fmt = "long", flush_output = TRUE)
 
 bench <- function(label, expr) {
     log_msg("Starting ", label, " run")
@@ -145,44 +141,43 @@ summary_xy <- function(xy) {
     )
 }
 
-inspect_slot <- function(slot, slot_name, hours) {
-    if (!is.list(slot) || is.null(slot$Tz)) {
+# Reports spatial spread across pixels of each variable's MEDIAN quantile
+# value, per (month, daypart) combo -- the reduced-format equivalent of what
+# this used to report per raw HOUR (raw hourly per-pixel arrays no longer
+# exist on disk as of the 2026-08-05 write-time quantile-reduction move; see
+# get_colonization.R's .compute_voxel_quantiles()/get_clim_voxel()). Still
+# answers the same underlying question ("is there real per-pixel spatial
+# variance in this height's climate?"), just at the (month, daypart)
+# granularity the new format actually stores rather than per raw hour.
+inspect_voxel_quantiles <- function(vq, combos) {
+    if (is.null(vq) || is.null(vq$quantiles)) {
         return(NULL)
     }
-    vars <- c("Tz", "relhum", "windspeed", "Rdirdown", "Rdifdown")
-    for (v in vars) {
-        arr <- slot[[v]]
-        if (is.null(arr) || length(dim(arr)) != 3) next
-        cat(sprintf("  %s / %s: dim=%s\n", slot_name, v, paste(dim(arr), collapse = "x")))
-        for (h in intersect(hours, seq_len(dim(arr)[3]))) {
-            stats <- summary_xy(arr[, , h])
-            cat(sprintf(
-                "    hour %3d: min=%.4f max=%.4f range=%.4f sd=%.4f\n",
-                h, stats["min"], stats["max"], stats["range"], stats["sd"]
-            ))
-        }
-        overall <- summary_xy(arr)
+    cat(sprintf("  raster: %d x %d = %d pixels\n", vq$nr, vq$nc, vq$nr * vq$nc))
+    for (key in intersect(combos, names(vq$quantiles))) {
+        medians <- vq$quantiles[[key]][, 3] # column 3 = the 50th percentile (QUANTILE_PROBS)
+        stats <- summary_xy(medians)
         cat(sprintf(
-            "    overall: min=%.4f max=%.4f range=%.4f sd=%.4f\n",
-            overall["min"], overall["max"], overall["range"], overall["sd"]
+            "  %-24s min=%.4f max=%.4f range=%.4f sd=%.4f\n",
+            key, stats["min"], stats["max"], stats["range"], stats["sd"]
         ))
     }
 }
 
-inspect_height <- function(height, microenv, hours = c(1, 50, 100, 150, 200, 250)) {
+inspect_height <- function(height, microenv,
+                           combos = c("1_day_temp", "1_night_temp", "1_day_relhum",
+                                      "1_day_swdown", "annual_both_windspeed")) {
     cat("Inspecting height:", height, "\n")
     h <- load_height(microenv, height)
     if (is.null(h)) {
         cat("  height not found\n")
         return(NULL)
     }
-    if (!is.null(h$tme)) {
-        # New format: flat, no tmax/tmin day-type split.
-        inspect_slot(h, "annual", hours)
-    } else {
-        inspect_slot(h$tmax, "tmax", hours)
-        inspect_slot(h$tmin, "tmin", hours)
+    if (is.null(h$voxel_quantiles)) {
+        cat("  no voxel_quantiles -- height file predates the 2026-08-05 quantile-reduction move, regenerate via run_microclimate_site.R\n")
+        return(NULL)
     }
+    inspect_voxel_quantiles(h$voxel_quantiles, combos)
     invisible(TRUE)
 }
 
@@ -200,7 +195,7 @@ main <- function() {
     microenv <- readRDS(microenv_path)
 
     log_msg("Inspecting raw spatial variance for height 0.5")
-    inspect_height(0.5, microenv, hours = c(1, 50, 100, 150, 200, 250))
+    inspect_height(0.5, microenv)
     log_msg("Finished raw variance inspection")
 
     if (!opts$compare) {

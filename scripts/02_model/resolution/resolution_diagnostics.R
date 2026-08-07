@@ -28,7 +28,8 @@ DIAG_SPINUP    <- 2
 N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
 if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
 
-log_msg <- function(msg) message("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
+source("scripts/02_model/lib_logging.R")
+log_msg <- make_log_msg()
 
 # ── Site setup (mirrors run_colonization.R) ─────────────────────────────
 niches <- load_observations()

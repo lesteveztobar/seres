@@ -47,6 +47,9 @@ library(patchwork)
 library(parallel)
 source("scripts/02_model/config/paths.R")
 source("scripts/02_model/engine/get_colonization.R")
+# plot_abundance()/plot_3d_abundance() (used in the interactive plotting
+# section below) live in plot_functions.R, not get_colonization.R.
+source("scripts/02_model/plots/plot_functions.R")
 
 # ── Command-line arguments (for cluster / batch runs) ────────────────────────
 args         <- commandArgs(trailingOnly = TRUE)
@@ -62,11 +65,8 @@ dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
 log_file <- file.path(LOGS_DIR,
   sprintf("colonization_%s_%s%s_%s.log", site_name, exp_tag, manifest_suffix,
           format(Sys.time(), "%Y%m%d_%H%M%S")))
-log_msg <- function(msg) {
-  stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
-  message(stamped)
-  cat(stamped, "\n", file = log_file, append = TRUE)
-}
+source("scripts/02_model/lib_logging.R")
+log_msg <- make_log_msg(log_file = log_file)
 log_msg("run_colonization.R started")
 
 # ── 1. Load microenvironment ──────────────────────────────────────────────────

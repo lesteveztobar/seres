@@ -22,6 +22,7 @@ library(microclimf)
 library(microclimdata)
 library(terra)
 library(luna)
+library(parallel)
 
 PYTHON_PATH <- Sys.getenv("CANOPY_PYTHON",
   unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python")
@@ -30,6 +31,11 @@ reticulate::use_python(PYTHON_PATH, required = TRUE)
 source("scripts/01_microclimate/lib.R")
 source("scripts/02_model/config/paths.R")
 source("scripts/00_data_conversion/helper_functions.R")
+# .compute_voxel_quantiles() -- the per-pixel/month/daypart quantile
+# reduction applied to each height's output below, before it's written to
+# scratch. get_colonization.R has no top-level library()/source() calls of
+# its own, so this is a lightweight addition.
+source("scripts/02_model/engine/get_colonization.R")
 
 mycredentials <- readRDS(file.path(BASE_DIR, "credentials.rds"))
 cds_row <- mycredentials[mycredentials$Site == "CDS", ]
@@ -45,11 +51,8 @@ ee$Initialize(project = "ee-lizethestevezt")
 dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
 log_file <- file.path(LOGS_DIR,
   sprintf("microclim_%s_%s.log", TARGET_SITE, format(Sys.time(), "%Y%m%d_%H%M%S")))
-log_msg <- function(msg) {
-  stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
-  message(stamped)
-  cat(stamped, "\n", file = log_file, append = TRUE)
-}
+source("scripts/02_model/lib_logging.R")
+log_msg <- make_log_msg(log_file = log_file)
 log_msg(sprintf("run_microclimate_site.R started for %s", TARGET_SITE))
 
 # ── Directories ───────────────────────────────────────────────────────────────
@@ -239,17 +242,14 @@ dtmc          <- terra::resample(dtmdata, era5_template, method = "bilinear")
 dtmdata_w     <- terra::wrap(dtmdata)
 dtmc_w        <- terra::wrap(dtmc)
 
-n_cores   <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = parallel::detectCores() - 1L)))
+n_cores   <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = detectCores() - 1L)))
 n_heights <- length(heights)
 log_msg(sprintf("Launching parallel height loop: %d heights on %d cores...", n_heights, n_cores))
 
 .log_file <- log_file
-.wlog <- function(msg) {
-  stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "][worker] ", msg)
-  cat(stamped, "\n", file = .log_file, append = TRUE)
-}
+.wlog <- wlog(.log_file)  # from lib.R; production loop logs without pid=
 
-parallel::mclapply(seq_along(heights), function(i) {
+mclapply(seq_along(heights), function(i) {
   h          <- heights[i]
   h_key      <- sprintf("h%.2f", h)
   h_rds_path <- file.path(height_dir, sprintf("%s.rds", h_key))
@@ -263,23 +263,46 @@ parallel::mclapply(seq_along(heights), function(i) {
   mout <- microclimf::runmicro(micropoint = model, reqhgt = h,
     vegp = vegetationdata, soilc = soildata, dtm = dtm_, dtmc = dtmc_,
     altcorrect = 1, method = "R", out = unname(OUT_VARS))
-  # One shared timestamp vector per height-tier output (mout$tme, a POSIXct
-  # vector of length ntime, attached natively by runmicro()) -- not
-  # duplicated per variable, since Tz/relhum/windspeed/Rdirdown/Rdifdown all
-  # share the same time axis and length.
+  # Reduce in-memory here, before anything is written to disk: raw hourly
+  # per-pixel arrays (Tz/relhum/windspeed/Rdirdown/Rdifdown, each
+  # (nrow, ncol, ~8760)) filled the shared Lustre scratch workspace
+  # (91% used cluster-wide, 2026-08-04) and caused repeated
+  # "No space left on device" job failures after only a fraction of a
+  # site's heights completed. Two products are kept instead of the raw
+  # arrays, computed once here while the raw arrays are still in memory,
+  # then the raw arrays are discarded (never saveRDS()'d):
+  #   - voxel_quantiles: per-pixel/month/daypart quantiles for EVERY pixel
+  #     (.compute_voxel_quantiles(), get_colonization.R) -- feeds the
+  #     niche-scoring/per-voxel establishment system (get_clim_voxel()).
+  #     Computed over the whole raster, not one run's landscape footprint,
+  #     since no specific colonization run/landscape exists yet at this
+  #     point -- get_clim_voxel() subsets down to a run's own footprint at
+  #     model-run time, a cheap lookup rather than a recomputation.
+  #   - *_mean: spatially-averaged (one value per hour, not per pixel)
+  #     series for lookup_climate_by_height()/build_clim_cache() -- that
+  #     pathway (wind attenuation, precip/survival fallback means) was
+  #     already spatially flattened by design, so nothing is lost moving
+  #     its averaging step here instead of computing it lazily at read
+  #     time from the (now nonexistent) raw array. O(ntime), not
+  #     O(pixels*ntime) -- negligible size next to voxel_quantiles.
+  nr <- terra::nrow(dtm_)
+  nc <- terra::ncol(dtm_)
+  voxel_quantiles <- .compute_voxel_quantiles(mout, nr, nc)
   saveRDS(
     list(
-      tme       = mout$tme,
-      Tz        = mout$Tz,
-      relhum    = mout$relhum,
-      windspeed = mout$windspeed,
-      Rdirdown  = mout$Rdirdown,
-      Rdifdown  = mout$Rdifdown
+      tme             = mout$tme,
+      voxel_quantiles = voxel_quantiles,
+      temp_mean       = apply(mout$Tz, 3, mean, na.rm = TRUE),
+      relhum_mean     = apply(mout$relhum, 3, mean, na.rm = TRUE),
+      windspeed_mean  = apply(mout$windspeed, 3, mean, na.rm = TRUE),
+      Rdirdown_mean   = apply(mout$Rdirdown, 3, mean, na.rm = TRUE),
+      Rdifdown_mean   = apply(mout$Rdifdown, 3, mean, na.rm = TRUE)
     ),
     h_rds_path
   )
-  .wlog(sprintf("[%d/%d] %.2f m — done. %d timesteps, %s .. %s.",
-                i, n_heights, h, length(mout$tme), format(min(mout$tme)), format(max(mout$tme))))
+  .wlog(sprintf("[%d/%d] %.2f m — done. %d timesteps, %s .. %s. Saved: %.1f MB.",
+                i, n_heights, h, length(mout$tme), format(min(mout$tme)), format(max(mout$tme)),
+                file.info(h_rds_path)$size / 1e6))
   invisible(NULL)
 }, mc.cores = n_cores)
 
