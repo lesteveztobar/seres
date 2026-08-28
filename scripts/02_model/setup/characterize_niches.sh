@@ -11,7 +11,8 @@
 # already generated (run_microenv.sh / microenv_array.sh).
 #
 # Usage: sbatch scripts/02_model/setup/characterize_niches.sh [height_step]
-#   height_step defaults to 0.25 (the production resolution).
+#   height_step defaults to 0.4 (the production resolution as of
+#   2026-08-17, was 0.25).
 # Run from: /home/s38leste_hpc/canopymicroenv/
 #
 #SBATCH --partition=lm_medium
@@ -32,4 +33,4 @@ module load GCCcore/13.3.0
 module load R/4.4.2-gfbf-2024a
 
 cd /home/$USER/canopymicroenv
-Rscript scripts/02_model/setup/characterize_niches.R "${1:-0.25}"
+Rscript scripts/02_model/setup/characterize_niches.R "${1:-0.4}"

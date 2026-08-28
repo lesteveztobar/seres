@@ -32,7 +32,7 @@ SLURM submission (pass-through to sbatch; each script keeps its own
       sites x experiments matrix (many submit-colonization jobs).
 
   submit-niches [HEIGHT_STEP]
-      sbatch characterize_niches.sh (default height_step=0.25).
+      sbatch characterize_niches.sh (default height_step=0.4).
 
   submit-resolution-diagnostics SITE [HEIGHT_STEPS] [HORIZ_RES]
       sbatch run_resolution_diagnostics.sh -- timing only.

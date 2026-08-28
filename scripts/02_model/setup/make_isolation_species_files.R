@@ -21,7 +21,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
 
-
 niches <- load_observations()
 niches <- niches[!is.na(niches$lat) & !is.na(niches$lon) &
                  !is.na(niches$Height_m) & !is.na(niches$FinalID), ]

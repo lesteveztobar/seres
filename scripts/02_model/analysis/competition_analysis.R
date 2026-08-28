@@ -26,7 +26,7 @@
 #
 # Usage: Rscript scripts/02_model/analysis/competition_analysis.R [baseline_tag]
 #   baseline_tag: exp_tag of the multi-species run to compare against
-#   (colonization_<site>_<baseline_tag>_h0.25.rds). Defaults to
+#   (colonization_<site>_<baseline_tag>_h0.40.rds). Defaults to
 #   "realistic_273founders" -- realistic.rds's literature-default 30
 #   founders produces populations too small/noisy (final abundance ~4-8,
 #   DECLINING from the 30 founders) for this comparison to have any power;
@@ -38,6 +38,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 source("scripts/02_model/engine/get_colonization.R")
 
 args         <- commandArgs(trailingOnly = TRUE)
@@ -79,8 +80,8 @@ rows <- list()
 for (i in seq_len(nrow(manifest))) {
   site <- manifest$site[i]; sp <- manifest$species[i]; exp_tag <- manifest$exp_tag[i]
 
-  iso_path   <- file.path(PROCESSED_DIR, sprintf("colonization_%s_%s_h0.25.rds", site, exp_tag))
-  multi_path <- file.path(PROCESSED_DIR, sprintf("colonization_%s_%s_h0.25.rds", site, baseline_tag))
+  iso_path   <- file.path(PROCESSED_DIR, sprintf("colonization_%s_%s_h0.40.rds", site, exp_tag))
+  multi_path <- file.path(PROCESSED_DIR, sprintf("colonization_%s_%s_h0.40.rds", site, baseline_tag))
   if (!file.exists(iso_path) || !file.exists(multi_path)) {
     message("Skipping ", site, " / ", sp, " -- missing ",
             if (!file.exists(iso_path)) iso_path else multi_path)
@@ -117,10 +118,7 @@ result_df <- do.call(rbind, rows)
 if (is.null(result_df) || nrow(result_df) == 0) stop("No site/species pairs had both runs available.")
 
 result_df$height_shift_m <- result_df$mean_height_multispecies - result_df$mean_height_isolation
-result_df$sig <- ifelse(is.na(result_df$ks_p), "",
-                 ifelse(result_df$ks_p < 0.001, "***",
-                 ifelse(result_df$ks_p < 0.01,  "**",
-                 ifelse(result_df$ks_p < 0.05,  "*", "ns"))))
+result_df$sig <- .sig_stars(result_df$ks_p, na_str = "")  # shared_helpers.R
 
 cat("\n== Competition test: realized height distribution, isolation vs. multi-species ==\n")
 cat("height_shift_m = mean height WITH competitors minus mean height ALONE\n")

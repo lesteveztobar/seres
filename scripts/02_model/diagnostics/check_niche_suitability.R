@@ -46,7 +46,7 @@ site_name     <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipu
 extra_species <- if (length(args) >= 2 && nzchar(args[2])) strsplit(args[2], ",")[[1]] else character(0)
 height_step   <- if (length(args) >= 3 && nzchar(args[3])) as.numeric(args[3]) else 0.25
 
-niche_cache_path <- file.path(PROCESSED_DIR, "species_niches.rds")
+niche_cache_path <- NICHE_CACHE_PATH
 if (!file.exists(niche_cache_path))
   stop("No niche cache at ", niche_cache_path, " -- run characterize_niches.R first")
 niche_cache <- readRDS(niche_cache_path)
@@ -61,16 +61,20 @@ microenv <- readRDS(microenv_path)
 heights  <- microenv_heights(microenv)
 
 message("Building climate cache (reads all ", length(heights), " height files once)...")
-cc <- build_clim_cache(microenv)
+cc <- build_clim_cache_voxel(microenv)
 message("Done.")
 
 # Per-height climate scalars for the three niche variables (list-of-lists,
 # one per height tier, in the shape niche_axis_scores()/niche_raw_score()
 # expect) and the equivalent matrix form (for the ceiling lookup below).
+# No landscape/footprint defined for this diagnostic (no simulated grid the
+# way init_colonization() has) -- footprint = NULL pools per-height
+# quantiles across the whole raster, same one-row-per-height shape
+# height_clim_scalars() used to produce (see get_colonization.R).
 # landscape_clim_vals: complete-case rows only -- this landscape's own
 # vertical profile, used as the ceiling fallback for species with no local
 # observations at this site (see niche_ceiling()).
-height_scalars      <- height_clim_scalars(cc$clim_by_height)
+height_scalars      <- voxel_background_table(cc, microenv, footprint = NULL, months = "annual")
 landscape_clim_vals <- height_scalars[stats::complete.cases(height_scalars), , drop = FALSE]
 clim_by_height <- lapply(seq_len(nrow(height_scalars)), function(i) as.list(height_scalars[i, ]))
 clim_by_height <- Filter(function(cl) !anyNA(unlist(cl)), clim_by_height)

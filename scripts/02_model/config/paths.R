@@ -23,6 +23,17 @@ PARAMS_DIR <- file.path(BASE_DIR, "data", "params")
 # combined_with_identification.csv on 2026-07-24, once the latter had all
 # seven sites (post rebuild_combined_csv.py LaElenita/MindoMirador/Saloya
 # split -- see scripts/00_data_conversion/rebuild_combined_csv.py) and combinedv3.csv did not.
+#
+# 2026-08-28: briefly pointed straight at combinedv6.csv, then reverted --
+# Saloya's still-pending OAT-chain jobs (27169761-27169766) each freshly
+# source() this file when they actually start (paths.R is re-read from disk
+# at job START, not at sbatch submission), so changing the *default* here
+# would have silently switched them mid-sweep to a different dataset than
+# whatever the already-running/already-completed steps of that same chain
+# used -- an inconsistent, uninterpretable mix. combinedv6.csv work uses the
+# CANOPY_OBS_CSV override explicitly instead (see run_colonization_v6.sh /
+# any v6-tagged submission), leaving this default -- and every currently
+# in-flight job -- untouched.
 OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV",
   unset = file.path(CSV_DIR, "combined_with_identification.csv")
 )
@@ -53,6 +64,25 @@ load_observations <- function(path = OBSERVATIONS_CSV) {
   niches$FinalID[needs_default] <- "Maxillaria acutifolia"
   niches
 }
+
+# Cross-site species-niche cache (characterize_niches.R's output, loaded by
+# init_colonization() (get_colonization.R), .niche_plot_context() (plot_
+# functions.R), check_niche_suitability.R, and summarize_all_results.R).
+# Same override pattern as OBSERVATIONS_CSV, added 2026-08-28 for the same
+# reason: characterize_niches.R must be re-run against combinedv6.csv, but
+# overwriting species_niches.rds/niche_background_density.rds in place would
+# silently swap the niche model out from under every currently-running or
+# still-pending SLURM job that reads it fresh at its own start (same hazard
+# as OBSERVATIONS_CSV -- see that constant's comment above). Left unset,
+# both fall back to today's exact literal paths, so nothing in flight is
+# affected; v6 work sets CANOPY_NICHE_CACHE/CANOPY_NICHE_BACKGROUND
+# explicitly (see characterize_niches.R's invocation for v6).
+NICHE_CACHE_PATH <- Sys.getenv("CANOPY_NICHE_CACHE",
+  unset = file.path(PROCESSED_DIR, "species_niches.rds")
+)
+NICHE_BACKGROUND_PATH <- Sys.getenv("CANOPY_NICHE_BACKGROUND",
+  unset = file.path(PROCESSED_DIR, "niche_background_density.rds")
+)
 
 # project
 SCRIPTS_DIR <- file.path(BASE_DIR, "scripts")
