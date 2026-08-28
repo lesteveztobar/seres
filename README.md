@@ -11,7 +11,7 @@ This repository contains the full analysis pipeline for my master's thesis on th
 
 The core idea: instead of using coarse climate data to describe orchid habitat, this pipeline models the **exact microclimate at the height and location where each individual was observed** — at 0.4 m resolution across the full canopy vertical gradient (see [Notes](#notes) — the 0.25→0.4 m bump on 2026-08-17 was made for runtime and, unlike the original 0.25 m choice, has not itself been re-validated against the finer/coarser alternatives). These microclimate profiles characterise the realised niche of each species and feed a **3D spatially explicit colonization model** that simulates population dynamics (dispersal, establishment, survival, growth) across the canopy landscape, driven by microclimate-based vital rates.
 
-> ⚠️ **Work in progress.** Microclimate regeneration at the new 0.4 m production resolution is complete for all 7 sites, `species_niches.rds` has been rebuilt against it, and colonization sensitivity experiments are substantially underway (6/7 sites have final `reproduction_factorial_v3` results at 0.4 m; Saloya is still outstanding — see [Status](#status)). The 0.4 m spacing itself has not been run through the resolution outcome-comparison step (`height_res_array.sh`'s candidate list still doesn't include it) — see [Notes](#notes).
+> ⚠️ **Work in progress.** Microclimate regeneration at the new 0.4 m production resolution is complete for all 7 sites, `species_niches.rds` has been rebuilt against it, and colonization sensitivity experiments are substantially underway (6/7 sites have final `reproduction_factorial_v3` results at 0.4 m — see [Status](#status)). Saloya, the tallest-canopy site (125 height tiers), was dropped from production runs from v4/v5/v6 onward (2026-08-28): its climate-cache build was still running after 2+ days on `vlm_long` and wasn't worth the remaining wall-clock budget, so `batch_exp.sh` now filters it back out of the site list it otherwise derives automatically from the observations CSV. The 0.4 m spacing itself has not been run through the resolution outcome-comparison step (`height_res_array.sh`'s candidate list still doesn't include it) — see [Notes](#notes).
 
 ---
 
@@ -57,7 +57,8 @@ GeoJSON field exports
         ↓
   scripts/02_model/setup/make_params.R  # build parameter sweep RDS files for experiments
                                       # (incl. best_case.rds — persistence validation, see Notes)
-  scripts/02_model/run/batch_exp.sh / run_colonization.sh  # SLURM: 7 sites × experiments in parallel
+  scripts/02_model/run/batch_exp.sh / run_colonization.sh  # SLURM: sites × experiments in parallel
+                                      # (6/7 -- Saloya excluded from production, see warning note above)
   scripts/simple_model/simple_colonization.R  # standalone 3D model without microclimate
   scripts/simple_model/simple_experiments.R   # sensitivity experiments for simple model
   scripts/simple_model/run_extinction_heatmap.R  # fine-scale extinction threshold scan
@@ -112,7 +113,7 @@ sbatch scripts/02_model/resolution/run_resolution_diagnostics.sh Maquipucuna    
 sbatch scripts/02_model/resolution/run_height_resolution_experiment.sh Maquipucuna  # outcomes (best_case.rds)
 
 # Sensitivity experiments (after microclimate is done)
-sbatch scripts/02_model/run/batch_exp.sh    # 7 sites × experiments
+sbatch scripts/02_model/run/batch_exp.sh    # 6/7 sites (Saloya excluded) × experiments
 ```
 
 Each per-site microclimate job runs on the `vlm_long` partition (very-large-memory nodes) with 6 CPUs and 3000 GB RAM (raised 2026-08-09/10 from `lm_long`/1800G after real OOMs at both 900G and 1500G). It loads R/4.4.2, the Miniforge3 conda environment (`canopy_rgee`) for Earth Engine access, allocates a Lustre scratch workspace for per-height temp files via `ws_allocate`, and routes `TMPDIR` onto that same scratch workspace (node-local `/tmp` filled and silently truncated a run's heights before this). Logs are written to `logs/run_microclimate_<jobid>.log`/`.err`; the outer `microenv_array.sh` coordinator itself is a short `intelsr_short` job that just submits the chain.
@@ -298,7 +299,7 @@ canopymicroenv/
 | Resolution justification (timing + outcome comparison) | 🔄 In progress — still compares 0.1/0.25/0.5/1.0 m, **not** the new 0.4 m default (see [Notes](#notes)) |
 | Cross-site species niche characterization | ✅ Complete — `species_niches.rds` rebuilt against the 0.4 m manifests and the per-voxel scoring rewrite |
 | Colonization model — single site | ✅ Implemented and running per-site |
-| Colonization model — all sites | 🔄 In progress — final (non-checkpoint) `reproduction_factorial_v3` results at 0.4 m exist for 6/7 sites (Maquipucuna, Mashpi, MindoTarabita, LaElenita, MindoMirador, Yanayacu); Saloya has no 0.4 m colonization output yet |
+| Colonization model — all sites | 🔄 In progress — final (non-checkpoint) `reproduction_factorial_v3` results at 0.4 m exist for 6/7 sites (Maquipucuna, Mashpi, MindoTarabita, LaElenita, MindoMirador, Yanayacu); Saloya deliberately dropped from production (v4/v5/v6 onward, 2026-08-28 — see the warning note at the top of this README) |
 | Forest structure (`build_forest`, Myster 2017 params) | ✅ Implemented |
 | IPM equation primitives (`survival_logit` etc.) | ✅ Implemented |
 | Parameter sensitivity experiments | ✅ Implemented |
