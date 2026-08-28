@@ -68,7 +68,7 @@ cat("\n== Reproduction factorial (p_poll x p_germ x p_s1 x n_founders) ==\n")
 # that more than just Maquipucuna has a result -- plot_factorial_experiment()
 # already skips gracefully for any site that doesn't have one yet.
 for (site in SITES) {
-  safe_plot(paste("factorial", site), plot_factorial_experiment(site, "reproduction_factorial_v3_h0.25"))
+  safe_plot(paste("factorial", site), plot_factorial_experiment(site, "reproduction_factorial_v3_h0.40"))
 }
 
 cat("\n== Default (unswept) colonization runs ==\n")
@@ -85,10 +85,10 @@ cat("\n== Persistence validation runs (best-case / realistic / realistic_273foun
 # rerun (2026-07-18) -- see its header note on why 273 founders instead of
 # realistic.rds's literature-default 30.
 for (site in SITES) {
-  safe_plot(paste("best_case", site), plot_default_colonization_run(site, exp_tag = "best_case_h0.25"))
-  safe_plot(paste("realistic", site), plot_default_colonization_run(site, exp_tag = "realistic_h0.25"))
+  safe_plot(paste("best_case", site), plot_default_colonization_run(site, exp_tag = "best_case_h0.40"))
+  safe_plot(paste("realistic", site), plot_default_colonization_run(site, exp_tag = "realistic_h0.40"))
   safe_plot(paste("realistic_273founders", site),
-            plot_default_colonization_run(site, exp_tag = "realistic_273founders_h0.25"))
+            plot_default_colonization_run(site, exp_tag = "realistic_273founders_h0.40"))
 }
 
 cat("\nAll done. Plots (where inputs existed) are in", OUTPUT_DIR, "\n")

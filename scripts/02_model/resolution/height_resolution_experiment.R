@@ -37,6 +37,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 library(parallel)
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 source("scripts/02_model/engine/get_colonization.R")
 
 args         <- commandArgs(trailingOnly = TRUE)
@@ -65,11 +66,7 @@ mean_canopy <- mean(niches$CanopyHeight_m[niches$Area_or_Site == site_name], na.
 canopy_grid <- matrix(mean_canopy, nrow = 50, ncol = 50)
 site <- list(Site = site_name)
 
-forestparams <- list(
-  stems_per_ha = 298, mean_hgt = 8.4, sd_hgt = 3.5,
-  mean_crown_r = 2.0, sd_crown_r = 0.8, trunk_r = 0.114,
-  branch_density = 3.0, epiphyte_footprint_m2 = 0.02
-)
+forestparams <- default_forestparams()  # shared_helpers.R
 
 params <- readRDS(params_file)
 params$canopy_z <- mean_canopy
@@ -162,9 +159,7 @@ if (length(unique(final_df$height_step)) > 1 && nrow(final_df) >= 4) {
     dunn_df <- data.frame(
       comparison = dunn_res$comparisons,
       p_adj      = dunn_res$P.adjusted,
-      sig        = ifelse(dunn_res$P.adjusted < 0.001, "***",
-                   ifelse(dunn_res$P.adjusted < 0.01,  "**",
-                   ifelse(dunn_res$P.adjusted < 0.05,  "*", "ns")))
+      sig        = .sig_stars(dunn_res$P.adjusted)  # shared_helpers.R
     )
     cat("\n== Pairwise Dunn tests (Holm-adjusted): every height_step pair ==\n")
     print(dunn_df[order(dunn_df$p_adj), ], row.names = FALSE)

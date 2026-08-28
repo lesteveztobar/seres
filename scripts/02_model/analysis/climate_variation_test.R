@@ -40,67 +40,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
 source("scripts/02_model/engine/get_colonization.R")
+source("scripts/02_model/config/shared_helpers.R")
 library(terra)
 
-# ── Elevation helpers (formerly elevation_helpers.R; merged here 2026-07-28 —
-# ── this was its only sourcer) ──────────────────────────────────────────────
-# Per-observation elevation, combining field-recorded Elevation_m (present
-# for Maquipucuna/Mashpi/MiradorMindo) with digital-elevation-model
-# extraction at each observation's exact lat/lon (fills MindoTarabita/
-# Yanayacu, which have NO recorded elevation at all -- audit 2026-07-18:
-# 29/57 combinedv3.csv rows had Elevation_m == NA, entirely concentrated in
-# those two sites; the other 3 sites are 100% populated already).
-#
-# Reuses the per-site DTM already downloaded for microclimate modelling
-# (data/raw/<site>/dtm/dtm.tif, cached by get_dtm() in lib.R,
-# already reprojected to EPSG:4326 there) -- no new data acquisition needed,
-# every site already has one.
-#
-# Does NOT modify combinedv3.csv (a manually curated, merged dataset -- see
-# README's pipeline diagram) -- augment_elevation() returns an augmented
-# copy of whatever data frame you pass it. Field-recorded values are kept
-# as-is (not overwritten by the DTM) since they may reflect a field
-# GPS/altimeter reading more precise than a resampled DEM pixel; the DTM is
-# only used to fill in what the field record doesn't have.
-
-# DTM-extracted elevation (m) at each row's (lon, lat) for one site.
-.dtm_elevation <- function(site_name, lon, lat, raw_dir = RAW_DIR) {
-  dtm_path <- file.path(raw_dir, site_name, "dtm", "dtm.tif")
-  if (!file.exists(dtm_path)) {
-    warning("No DTM for ", site_name, " at ", dtm_path, " -- returning NA elevation")
-    return(rep(NA_real_, length(lon)))
-  }
-  dtm <- terra::rast(dtm_path)
-  pts <- terra::vect(data.frame(lon = lon, lat = lat), geom = c("lon", "lat"), crs = "EPSG:4326")
-  if (!terra::same.crs(pts, dtm)) pts <- terra::project(pts, terra::crs(dtm))
-  vals <- terra::extract(dtm, pts)
-  as.numeric(vals[[2]])  # column 1 is the auto ID, column 2 is the DTM's single band
-}
-
-# Adds Elevation_dtm_m (always DTM-derived, for auditing/comparison against
-# the field record) and Elevation_final_m (field-recorded Elevation_m where
-# present and numeric, DTM-derived otherwise -- the column downstream
-# analyses should actually use) to a niches-style data frame. Requires
-# Area_or_Site, lon, lat columns; Elevation_m is optional (treated as
-# entirely missing if absent).
-augment_elevation <- function(niches_df, raw_dir = RAW_DIR) {
-  niches_df$Elevation_dtm_m <- NA_real_
-  for (site_name in unique(niches_df$Area_or_Site)) {
-    idx <- which(niches_df$Area_or_Site == site_name)
-    if (length(idx) == 0) next
-    niches_df$Elevation_dtm_m[idx] <- .dtm_elevation(
-      site_name, niches_df$lon[idx], niches_df$lat[idx], raw_dir)
-  }
-
-  field_elev <- if ("Elevation_m" %in% names(niches_df)) {
-    suppressWarnings(as.numeric(niches_df$Elevation_m))
-  } else {
-    rep(NA_real_, nrow(niches_df))
-  }
-  niches_df$Elevation_final_m <- ifelse(!is.na(field_elev), field_elev, niches_df$Elevation_dtm_m)
-  niches_df
-}
-# ── End elevation helpers ───────────────────────────────────────────────────
+# Elevation helpers (augment_elevation(), .dtm_elevation()) and the
+# per-site/per-height climate series builder (.build_site_climate_series())
+# used below now live in shared_helpers.R -- relocated there 2026-08-27 once
+# climate_variation_between_sites.R needed them too.
 
 VARS <- NICHE_VARS  # c("temp", "relhum", "swdown") -- get_colonization.R
 
@@ -120,46 +66,27 @@ niches <- augment_elevation(niches)
 # doesn't exist yet).
 SITES <- sort(unique(niches$Area_or_Site))
 
-# ── Per-site, per-height, per-variable raw climate (every spatial pixel at
-# every height, not just the mean) -- pixel-level values give the
-# within-site Kruskal-Wallis/Dunn test real statistical power, the same way
+# ── Per-site, per-height, per-variable raw climate (every hourly timestep at
+# every height, not just the mean) -- this gives the within-site
+# Kruskal-Wallis/Dunn test real statistical power, the same way
 # plot_temperature_profile()'s existing test uses every pixel rather than
-# per-height means. ──────────────────────────────────────────────────────────
-site_pixels   <- list()   # site -> data.frame(height, temp, relhum, swdown)
-site_elev     <- numeric(0)
+# per-height means. Shared with climate_variation_between_sites.R -- see
+# .build_site_climate_series() (shared_helpers.R). ──────────────────────────
+sc <- .build_site_climate_series(SITES, niches = niches)
+site_pixels <- sc$site_pixels   # site -> data.frame(height, temp, relhum, swdown)
+site_elev   <- sc$site_elev
 
-for (site in SITES) {
-  microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s_h0.25.rds", site))
-  if (!file.exists(microenv_path)) {
-    message("Skipping ", site, " -- no ", microenv_path)
-    next
-  }
-  message("Reading ", site, "...")
-  microenv <- readRDS(microenv_path)
-  heights  <- microenv_heights(microenv)
-
-  # swdown: keep every row, including night/zero -- unlike the niche axis
-  # (which deliberately drops night hours, see .niche_var_mean() in
-  # get_colonization.R), here we want the full diurnal distribution actually
-  # sampled at each height, not a daytime-only summary.
-  # Parallel, not sequential: each lookup_climate_by_height() call reads one
-  # independent per-height file from scratch (see load_height()), same as
-  # build_clim_cache() (get_colonization.R) -- this loop hit its own SLURM
-  # time limit on 2026-07-27 running single-threaded on sites with 100-400+
-  # height tiers.
-  n_cores <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = 1L)))
-  px <- do.call(rbind, parallel::mclapply(heights, function(h) {
-    cl <- lookup_climate_by_height(h, microenv)
-    if (is.null(cl)) return(NULL)
-    data.frame(height = h, temp = cl$temp, relhum = cl$relhum, swdown = cl$swdown)
-  }, mc.cores = n_cores))
-  site_pixels[[site]] <- px
-  site_elev[site] <- mean(niches$Elevation_final_m[niches$Area_or_Site == site], na.rm = TRUE)
-}
-
-if (length(site_pixels) == 0) stop("No sites had a usable microenv_<site>_h0.25.rds.")
+if (length(site_pixels) == 0) stop("No sites had a usable microenv_<site>_h0.40.rds.")
 
 # ── Test 1: within-site, per variable -- Kruskal-Wallis + Dunn pairwise ────
+# eps_sq (epsilon-squared, Tomczak & Tomczak 2014) is Kruskal-Wallis's
+# standard companion effect size: (H - k + 1) / (n - k), clamped at 0 --
+# added 2026-08-27 because at this test's sample sizes (every hourly
+# timestep x every height tier -> tens of thousands of rows per site x
+# variable) kw_p underflows to a literal 0 almost everywhere (real vertical
+# structure + huge n saturates the chi-squared tail past double-precision
+# range), so p alone can't distinguish "barely detectable" from "enormous"
+# vertical structure -- eps_sq (0-1, roughly R^2-like) can.
 kw_dunn_one <- function(df, var) {
   x <- df[[var]]; g <- factor(df$height)
   ok <- is.finite(x)
@@ -167,12 +94,22 @@ kw_dunn_one <- function(df, var) {
   if (nlevels(g) < 2 || length(x) < 4) return(NULL)
   kt <- tryCatch(kruskal.test(x, g), error = function(e) NULL)
   if (is.null(kt)) return(NULL)
-  dunn_res <- tryCatch(dunn.test::dunn.test(x, g, method = "holm", kw = FALSE, label = FALSE),
-                       error = function(e) NULL)
+  # dunn.test() always emits its full pairwise comparison table regardless
+  # of `kw=`/`label=` -- for a site with 100+ height tiers that's a
+  # 100x100+ matrix (up to ~5000 pairs) on every one of the 21 site x
+  # variable calls this script makes. It emits via rlang::inform(), i.e. a
+  # message condition (stderr), not cat()/print() -- capture.output() (which
+  # only redirects stdout) does NOT catch it; suppressMessages() does.
+  # (2026-08-27: confirmed via `deparse(dunn.test::dunn.test)` after
+  # capture.output() alone left runtime completely unchanged.)
+  dunn_res <- tryCatch(
+    suppressMessages(dunn.test::dunn.test(x, g, method = "holm", kw = FALSE, label = FALSE)),
+    error = function(e) NULL)
   n_sig <- if (!is.null(dunn_res)) sum(dunn_res$P.adjusted < 0.05) else NA_integer_
   n_pairs <- if (!is.null(dunn_res)) length(dunn_res$P.adjusted) else NA_integer_
+  eps_sq <- max(0, (unname(kt$statistic) - nlevels(g) + 1) / (length(x) - nlevels(g)))
   data.frame(kw_chisq = unname(kt$statistic), kw_df = unname(kt$parameter),
-             kw_p = kt$p.value, n_height_tiers = nlevels(g),
+             kw_p = kt$p.value, eps_sq = eps_sq, n_height_tiers = nlevels(g),
              n_sig_pairs = n_sig, n_pairs = n_pairs)
 }
 

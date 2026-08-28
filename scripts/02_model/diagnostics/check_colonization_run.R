@@ -18,6 +18,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 
 args      <- commandArgs(trailingOnly = TRUE)
 site_name <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipucuna"
@@ -27,37 +28,30 @@ in_path <- file.path(PROCESSED_DIR, sprintf("colonization_%s_%s.rds", site_name,
 if (!file.exists(in_path)) stop("No results at ", in_path)
 result <- readRDS(in_path)
 
-if (is.data.frame(result)) {
+shape <- .classify_result_shape(result)  # shared_helpers.R
+
+if (shape$shape == "sweep") {
   cat(sprintf("\n== %s / %s (sweep/factorial) ==\n", site_name, exp_tag))
+  cat(sprintf("Swept parameter(s): %s\n", paste(shape$swept, collapse = ", ")))
 
-  fixed_cols <- c("rep", "t", "totalS", "totalJ", "totalA", "total", "extinct")
-  swept      <- setdiff(names(result), fixed_cols)
-  cat(sprintf("Swept parameter(s): %s\n", paste(swept, collapse = ", ")))
-
-  t_max <- max(result$t)
-  final <- result[result$t == t_max, ]
-  # One row per unique parameter combination (averaging over reps, if >1).
-  form  <- as.formula(paste("cbind(extinct, total) ~", paste(swept, collapse = " + ")))
-  combo <- aggregate(form, data = final, FUN = mean)
-  combo$persisted <- !as.logical(round(combo$extinct))
-
-  cat(sprintf("%d unique combination(s), final year t=%d\n", nrow(combo), t_max))
+  combo <- shape$combo
+  cat(sprintf("%d unique combination(s), final year t=%d\n", nrow(combo), shape$t_max))
   cat(sprintf("\nPersisted: %d/%d (%.1f%%) combinations (adults present in the second half of the run)\n",
               sum(combo$persisted), nrow(combo), 100 * mean(combo$persisted)))
 
   cat("\nPersistence rate by parameter level (marginal — averaged over the other swept parameters):\n")
-  for (v in swept) {
+  for (v in shape$swept) {
     rate <- tapply(combo$persisted, combo[[v]], mean)
     cat(sprintf("  %s:\n", v))
     print(round(100 * rate, 1))
   }
 
-  persisting <- combo[combo$persisted, ]
+  persisting <- shape$persisting
   if (nrow(persisting) > 0) {
     cat(sprintf("\nAmong persisting combinations: final total abundance %.0f–%.0f (median %.0f)\n",
                 min(persisting$total), max(persisting$total), median(persisting$total)))
     cat("\nParameter bounding box among persisting combinations:\n")
-    for (v in swept) {
+    for (v in shape$swept) {
       cat(sprintf("  %s: %s to %s\n", v,
                   format(min(persisting[[v]])), format(max(persisting[[v]]))))
     }
@@ -75,12 +69,22 @@ cat(sprintf("%d replicate(s) requested, %d succeeded\n",
 # run_replicated() uses (adult total == 0 for the whole second half of the run).
 final_t <- max(result$summary$t)
 final <- result$summary[result$summary$t == final_t, ]
-final <- final[order(final$rep), c("rep", "totalS", "totalJ", "totalA", "total", "extinct")]
+has_recruited_col <- "recruited" %in% names(result$summary)
+final_cols <- c("rep", "totalS", "totalJ", "totalA", "total", "extinct",
+                if (has_recruited_col) "recruited")
+final <- final[order(final$rep), final_cols]
 cat(sprintf("\nFinal-year (t=%d) abundance by replicate:\n", final_t))
 print(final, row.names = FALSE)
 
 cat(sprintf("\nPersisted: %d/%d replicates (adults present at some point in the second half of the run)\n",
             sum(!final$extinct), nrow(final)))
+# recruited (2026-08-28): a replicate can be "persisting" above purely on
+# founder-cohort decay, with zero seedling/juvenile replacement -- this
+# distinguishes that from genuine self-sustaining recruitment.
+if (has_recruited_col) {
+  cat(sprintf("Recruiting: %d/%d replicates (any S/J individuals in the second half of the run)\n",
+              sum(final$recruited), nrow(final)))
+}
 
 # Trajectory summary across all years, averaged over replicates -- a quick
 # read on trend (growing/declining/flat) without opening a plot.

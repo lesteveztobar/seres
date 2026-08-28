@@ -243,6 +243,40 @@ local({
   assignInNamespace("checkinputs", fixed_fn, ns = "microclimf")
 })
 
+# microclimf::runmicro takes a `method` argument ("R" | "Cpp") and forwards
+# it to .runmicrosnow1()/.runmicrosnow2() (snow=TRUE path -- neither of
+# those two actually has a method parameter, so nothing to fix there) and
+# .runmicronosnow() (snow=FALSE, the path this project always uses) -- but
+# the call to .runmicronosnow() never actually includes `method` in its
+# argument list, so it silently falls back to .runmicronosnow()'s own
+# method="Cpp" default regardless of what runmicro(method=...) was called
+# with. Discovered 2026-08-10 while investigating why an earlier method="R"
+# vs method="Cpp" timing/correctness comparison found them near-identical
+# in both speed and output (max|diff|=0) -- turns out both runs silently
+# took the exact same Cpp-branch code path the whole time. Doesn't change
+# this project's own behavior (method="Cpp" is what run_microclimate_site.R
+# already requests, and "Cpp" was always the effective default here either
+# way), but the parameter should genuinely reach where it's supposed to.
+local({
+  ns   <- getNamespace("microclimf")
+  orig <- get("runmicro", envir = ns)
+  body_txt <- paste(deparse(body(orig)), collapse = "\n")
+  fixed_txt <- gsub(
+    "mout\\s*<-\\s*\\.runmicronosnow\\(micropoint,\\s*reqhgt,\\s*vegp,\\s*soilc,\\s*dtm,\\s*dtmc,\\s*altcorrect,\\s*runchecks,\\s*pai_a,\\s*tfact,\\s*out,\\s*slr,\\s*apr,\\s*hor,\\s*twi,\\s*wsa,\\s*svf\\)",
+    "mout <- .runmicronosnow(micropoint, reqhgt, vegp, soilc, dtm, dtmc, altcorrect, runchecks, pai_a, tfact, out, slr, apr, hor, twi, wsa, svf, method)",
+    body_txt, perl = TRUE
+  )
+  # Fail loudly rather than silently patching nothing if a future package
+  # update reformats this call and the pattern stops matching.
+  if (identical(fixed_txt, body_txt)) {
+    stop("patches.R: runmicro() method-forwarding patch pattern no longer matches -- microclimf package source may have changed, update the patch.")
+  }
+  fixed_body <- parse(text = fixed_txt)[[1]]
+  fixed_fn   <- orig
+  body(fixed_fn) <- fixed_body
+  assignInNamespace("runmicro", fixed_fn, ns = "microclimf")
+})
+
 # microclimdata::vegheight_download was written for Windows and appends
 # "python.exe" to pathtopython. On macOS/Linux the binary is just "python".
 assignInNamespace("vegheight_download",

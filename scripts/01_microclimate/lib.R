@@ -23,6 +23,52 @@ wlog <- function(log_file, with_pid = FALSE) {
   }
 }
 
+# ── Height ceiling ────────────────────────────────────────────────────────────
+
+# The model's height ceiling must be the canopy top, not the tallest
+# recorded epiphyte observation (hobs_max) -- the latter only reflects where
+# individuals happened to be found by observers, not how tall the forest
+# actually is, and silently truncates the microclimate/landscape grid below
+# the real canopy (e.g. Maquipucuna's forest is ~14.7 m tall on average, but
+# hObs_max there is only 5.5 m). Preference order:
+#   1. `measured` -- measured CanopyHeight_m from combinedv3.csv
+#      (make_sites(), this file), when available: real field measurements
+#      at the observation points, more trustworthy than a remote-sensing
+#      product for this specific forest.
+#   2. 99th percentile of the GEE canopy-height raster already downloaded
+#      for microclimf's vegetation parameters (vhgt.tif, at `vhgt_path`) --
+#      robust to single-pixel outliers, unlike a bare max().
+#   3. `hobs_max`, if neither of the above is available.
+# Never goes below hobs_max regardless of source (every observed individual
+# must remain inside the modelled height range).
+#
+# Formerly duplicated (once inline in run_microclimate_site.R, once as
+# check_microenv_progress.R's own height_ceiling_for()) -- consolidated
+# here. `log_fn` is optional: pass log_msg()/wlog() for the descriptive,
+# per-branch messages the real pipeline run wants; leave it NULL for a
+# quiet call (check_microenv_progress.R's lightweight report use case).
+height_ceiling <- function(measured, vhgt_path, hobs_max, log_fn = NULL) {
+  log_it <- if (is.null(log_fn)) function(...) invisible(NULL) else log_fn
+  if (!is.null(measured) && is.finite(measured)) {
+    log_it(sprintf("Canopy height (measured, CanopyHeight_m): %.1f m (hObs_max was %.1f m)",
+                   measured, hobs_max))
+    return(max(measured, hobs_max))
+  }
+  if (!requireNamespace("terra", quietly = TRUE) || !file.exists(vhgt_path)) {
+    log_it("No measured CanopyHeight_m and no vhgt.tif -- falling back to hObs_max.")
+    return(hobs_max)
+  }
+  vals <- tryCatch(terra::values(terra::rast(vhgt_path), na.rm = TRUE), error = function(e) numeric(0))
+  if (length(vals) == 0) {
+    log_it("No measured CanopyHeight_m and vhgt.tif has no valid values -- falling back to hObs_max.")
+    return(hobs_max)
+  }
+  ceiling_from_canopy <- as.numeric(quantile(vals, 0.99, na.rm = TRUE))
+  log_it(sprintf("No measured CanopyHeight_m -- using p99 of vhgt.tif: %.1f m (hObs_max was %.1f m)",
+                 ceiling_from_canopy, hobs_max))
+  max(ceiling_from_canopy, hobs_max)
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Part 1: data acquisition (formerly get_climateinputs.R)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -119,16 +165,16 @@ concat_era5_nc <- function(infiles, outfile) {
 
   # Build output variables (same structure as source)
   out_vars <- lapply(names(src$var), function(vname) {
-    v     <- src$var[[vname]]
-    vdims <- lapply(v$dim, function(d) out_dims[[d$name]])
-    ncvar_def(vname, v$units, vdims, v$missval)
+    var_meta <- src$var[[vname]]
+    vdims <- lapply(var_meta$dim, function(d) out_dims[[d$name]])
+    ncvar_def(vname, var_meta$units, vdims, var_meta$missval)
   })
   names(out_vars) <- names(src$var)
 
   nc_out <- nc_create(outfile, vars = out_vars)
   for (vname in names(src$var)) {
-    v      <- src$var[[vname]]
-    is_tvar <- any(sapply(v$dim, function(d) d$name == tname))
+    var_meta <- src$var[[vname]]
+    is_tvar <- any(sapply(var_meta$dim, function(d) d$name == tname))
     if (is_tvar) {
       pieces   <- lapply(ncs, function(nc) ncvar_get(nc, vname))
       combined <- abind::abind(pieces, along = length(dim(pieces[[1]])))
@@ -221,9 +267,9 @@ fix_lsm <- function(nc_path) {
         user     = credentials$username[credentials$Site == "CDS"],
         transfer = TRUE, path = paste0(month_tmp, "/"), retry = 120, verbose = TRUE
       )
-      for (z in list.files(month_tmp, pattern = "\\.zip$", full.names = TRUE)) {
-        unzip(z, exdir = month_tmp)
-        unlink(z)
+      for (zip_file in list.files(month_tmp, pattern = "\\.zip$", full.names = TRUE)) {
+        unzip(zip_file, exdir = month_tmp)
+        unlink(zip_file)
       }
 
       merge_era5_steptype_files(pathin = month_tmp, pathout = month_nc)
@@ -305,7 +351,7 @@ get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE, outpu
     start_time = site$tme_start, end_time = site$tme_end,
     by_month   = TRUE, outfile_name = site$Site
   )
-  req_keys <- vapply(req, function(x) sprintf("%s_%s", x$year, x$month), character(1))
+  req_keys <- vapply(req, function(req_item) sprintf("%s_%s", req_item$year, req_item$month), character(1))
 
   if (!file.exists(merged_file) || overwrite) {
     new_month_files <- .download_era5_months(req, site, credentials, dir, overwrite = TRUE)

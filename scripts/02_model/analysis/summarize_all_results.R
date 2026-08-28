@@ -15,6 +15,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 
 niches <- load_observations()
 niches <- niches[!is.na(niches$lat) & !is.na(niches$lon) &
@@ -27,7 +28,7 @@ SITES <- sort(unique(niches$Area_or_Site))
 cat("========================================\n")
 cat("Niche characterization\n")
 cat("========================================\n")
-niche_cache_path <- file.path(PROCESSED_DIR, "species_niches.rds")
+niche_cache_path <- NICHE_CACHE_PATH
 if (file.exists(niche_cache_path)) {
   niche_cache <- readRDS(niche_cache_path)
   n_cached <- sum(!vapply(niche_cache, is.null, logical(1)))
@@ -53,35 +54,30 @@ summarize_one <- function(in_path, label) {
   result <- readRDS(in_path)
   cat(sprintf("\n-- %s --\n", label))
 
-  if (is.data.frame(result)) {
-    fixed_cols <- c("rep", "t", "totalS", "totalJ", "totalA", "total", "extinct")
-    swept      <- setdiff(names(result), fixed_cols)
-    if (length(swept) == 0 || nrow(result) == 0) {
+  shape <- .classify_result_shape(result)  # shared_helpers.R
+
+  if (shape$shape == "sweep") {
+    if (shape$degenerate) {
       cat("  (empty/degenerate result)\n")
       return(invisible(TRUE))
     }
-    t_max <- max(result$t)
-    final <- result[result$t == t_max, ]
-    form  <- as.formula(paste("cbind(extinct, total) ~", paste(swept, collapse = " + ")))
-    combo <- aggregate(form, data = final, FUN = mean)
-    combo$persisted <- !as.logical(round(combo$extinct))
-
+    combo <- shape$combo
     cat(sprintf("  Swept: %s | %d combination(s) | final year t=%d\n",
-                paste(swept, collapse = " x "), nrow(combo), t_max))
+                paste(shape$swept, collapse = " x "), nrow(combo), shape$t_max))
     cat(sprintf("  Persisted: %d/%d (%.1f%%)\n",
                 sum(combo$persisted), nrow(combo), 100 * mean(combo$persisted)))
 
-    for (v in swept) {
+    for (v in shape$swept) {
       rate <- tapply(combo$persisted, combo[[v]], mean)
       cat(sprintf("    Persistence by %s: %s\n", v,
                   paste(sprintf("%s=%.1f%%", names(rate), 100 * rate), collapse = ", ")))
     }
 
-    persisting <- combo[combo$persisted, ]
+    persisting <- shape$persisting
     if (nrow(persisting) > 0) {
       cat(sprintf("  Among persisting: final total abundance %.0f-%.0f (median %.0f)\n",
                   min(persisting$total), max(persisting$total), median(persisting$total)))
-      for (v in swept) {
+      for (v in shape$swept) {
         cat(sprintf("    %s bounding box among persisting: %s to %s\n",
                     v, format(min(persisting[[v]])), format(max(persisting[[v]]))))
       }
@@ -92,17 +88,22 @@ summarize_one <- function(in_path, label) {
   }
 
   # run_replicated() list shape: list(runs = <one per replicate>, summary = <tidy df>)
-  runs <- if (is.list(result) && !is.null(result$runs)) result$runs else list(result)
-  n_ok <- sum(!vapply(runs, is.null, logical(1)))
-  cat(sprintf("  %d/%d replicate(s) succeeded\n", n_ok, length(runs)))
-  if (n_ok == 0 || is.null(result$summary)) return(invisible(TRUE))
+  cat(sprintf("  %d/%d replicate(s) succeeded\n", shape$n_ok, shape$n_runs))
+  if (shape$n_ok == 0 || is.null(shape$summary)) return(invisible(TRUE))
 
-  final_t <- max(result$summary$t)
-  final   <- result$summary[result$summary$t == final_t, ]
+  final <- shape$final
   cat(sprintf("  Persisted: %d/%d replicates (adults present in 2nd half of run)\n",
               sum(!final$extinct), nrow(final)))
+  # n_recruiting (2026-08-28, .classify_result_shape()): distinguishes
+  # genuine self-sustaining persistence from a founder cohort just decaying
+  # with zero seedling/juvenile replacement -- see get_colonization.R's
+  # `recruited` column.
+  if (!is.null(shape$n_recruiting) && !is.na(shape$n_recruiting)) {
+    cat(sprintf("  Recruiting: %d/%d replicates (any S/J in 2nd half of run)\n",
+                shape$n_recruiting, nrow(final)))
+  }
   cat(sprintf("  Final-year (t=%d) total abundance by replicate: %s\n",
-              final_t, paste(round(final$total), collapse = ", ")))
+              shape$final_t, paste(round(final$total), collapse = ", ")))
   invisible(TRUE)
 }
 
@@ -111,11 +112,11 @@ cat("Persistence validation (best_case / realistic / realistic_273founders)\n")
 cat("========================================\n")
 any_persistence <- FALSE
 for (site in SITES) {
-  ok1 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_best_case_h0.25.rds", site)),
+  ok1 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_best_case_h0.40.rds", site)),
                        sprintf("%s / best_case", site))
-  ok2 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_h0.25.rds", site)),
+  ok2 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_h0.40.rds", site)),
                        sprintf("%s / realistic", site))
-  ok3 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_273founders_h0.25.rds", site)),
+  ok3 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_273founders_h0.40.rds", site)),
                        sprintf("%s / realistic_273founders", site))
   any_persistence <- any_persistence || isTRUE(ok1) || isTRUE(ok2) || isTRUE(ok3)
 }
@@ -127,9 +128,9 @@ cat("========================================\n")
 any_factorial <- FALSE
 for (site in SITES) {
   final_path <- file.path(PROCESSED_DIR,
-    sprintf("colonization_%s_reproduction_factorial_v3_h0.25.rds", site))
+    sprintf("colonization_%s_reproduction_factorial_v3_h0.40.rds", site))
   ckpt_path <- file.path(PROCESSED_DIR,
-    sprintf("colonization_%s_reproduction_factorial_v3_h0.25_checkpoint.rds", site))
+    sprintf("colonization_%s_reproduction_factorial_v3_h0.40_checkpoint.rds", site))
 
   if (file.exists(final_path)) {
     ok <- summarize_one(final_path, sprintf("%s / reproduction_factorial_v3", site))

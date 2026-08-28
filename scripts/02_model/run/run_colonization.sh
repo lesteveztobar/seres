@@ -36,7 +36,7 @@ PARAMS=$2    # path to params RDS (e.g. data/params/p_poll.rds), or omit for lit
 
 EXPTAG=$3
 
-HEIGHT_STEP=$4  # microenv height-tier spacing to run at (must already exist); default 0.25 if omitted
+HEIGHT_STEP=$4  # microenv height-tier spacing to run at (must already exist); default 0.4 if omitted (run_colonization.R supplies the default)
 
 SPECIES_FILE=$5  # optional: path to an RDS of FinalID values (params$species_subset) -- see
                  # run_colonization.R's species_file arg. Omit for every species observed at the site.

@@ -24,21 +24,16 @@
 # many times and crash the population almost every year — see methods.tex
 # for the derivation and the corresponding shifted parameter table.
 #
-survival_logit <- function(stage, s, temp, relhum, swdown_rel,
+survival_logit <- function(stage, size, temp, relhum, swdown_rel,
                            beta0_S, beta0_J, beta0_A, beta1,
                            beta_light_benefit = 0.30,
                            beta_light_stress_penalty = 0.20) {
-  # pmin()/pmax() (not min()/max()) throughout: temp/relhum/swdown_rel are now
-  # per-voxel arrays (see .clim_voxel_slice()), and min()/max() on a vector
-  # collapse it to a single scalar instead of comparing elementwise -- pmin/
-  # pmax give the same result as min/max when the inputs are plain scalars,
-  # so this is unchanged behavior for any remaining scalar call site.
   light_effect <- beta_light_benefit * pmin(swdown_rel, 1.0) -
     beta_light_stress_penalty * pmax(0, swdown_rel - 1.5)
   eta <- switch(stage, # eta is the linear predictor
-    S = beta0_S + beta1 * s - ((100 - relhum) / 100) + light_effect,
-    J = beta0_J + beta1 * s + 0.5 * light_effect,
-    A = beta0_A + beta1 * s - pmax(0, (temp - 23) * 0.05),
+    S = beta0_S + beta1 * size - ((100 - relhum) / 100) + light_effect,
+    J = beta0_J + beta1 * size + 0.5 * light_effect,
+    A = beta0_A + beta1 * size - pmax(0, (temp - 23) * 0.05),
     stop("survival_logit: stage must be 'S', 'J', or 'A'")
   )
   return(1 / (1 + exp(-eta)))
@@ -61,7 +56,6 @@ transition_logit <- function(stage, precip_annual_mm, relhum_mean,
     beta_rh * relhum_mean))))
 }
 
-
 # ── Vital rate functions ──────────────────────────────────────────────────────
 # Named following IPM notation: s(z,e), g(s'|s,e), p_r(s), f_s(s), p_est(e)
 # s  = pseudobulb length (cm) — state variable
@@ -74,10 +68,10 @@ transition_logit <- function(stage, precip_annual_mm, relhum_mean,
 # Form follows Raventós (2015) and Jacquemyn et al. (2010): logistic on size.
 # At s=7 cm: P ≈ 0.50 | z=10 cm: P ≈ 0.82 | z=15 cm: P ≈ 0.98
 # Sources: Raventós (2015), Zotz & Schmidt (2006), Zotz (1998), Jacquemyn (2010)
-flowering_prob <- function(s,
+flowering_prob <- function(size,
                            alpha0 = -3.5, # intercept: threshold near 7 cm
                            alpha1 = 0.5) { # size slope
-  1 / (1 + exp(-(alpha0 + alpha1 * s)))
+  1 / (1 + exp(-(alpha0 + alpha1 * size)))
 }
 
 # ── f_s(s): Fruit production (conditional on flowering) ───────────────────────
@@ -87,9 +81,9 @@ flowering_prob <- function(s,
 # At s=7 cm: ~0.9 fruits | s=12 cm: ~1.7 fruits | s=20 cm: ~4.1 fruits
 # Sources: Raventós (2015) — Poisson regression of fruit number on size alone
 #          Zotz (1998) — positive size effect on fruit number and fruit size
-fruit_number <- function(s, rho_0 = -1.0, rho_1 = 0.12, stochastic = FALSE) {
+fruit_number <- function(size, rho_0 = -1.0, rho_1 = 0.12, stochastic = FALSE) {
   # rho_0 <- starting level of fecundity ; rho_1 <- how quickly fecundity rises with size
-  mu <- exp(rho_0 + rho_1 * s) # exp ensures positive results
+  mu <- exp(rho_0 + rho_1 * size) # exp ensures positive results
   if (stochastic) rpois(1, lambda = max(mu, 0)) else mu
 }
 
@@ -107,7 +101,7 @@ fruit_number <- function(s, rho_0 = -1.0, rho_1 = 0.12, stochastic = FALSE) {
 # by the adult size-update step in run_pass3_survive_grow().
 # Sources: Zotz (1998), Zotz & Schmidt (2006), Raventós (2015),
 #          McCormick & Jacquemyn (2014)
-reproduce <- function(N, s,
+reproduce <- function(N, size,
                       p_poll = 0.30, # pollination probability
                       p_germ = 0.001, # germination probability
                       p_s1 = 0.45, # first-year seelding survival
@@ -115,8 +109,8 @@ reproduce <- function(N, s,
   if (is.na(N) || N == 0) {
     return(0L)
   }
-  p_flower <- flowering_prob(s)
-  n_fruits <- fruit_number(s, stochastic = stochastic)
+  p_flower <- flowering_prob(size)
+  n_fruits <- fruit_number(size, stochastic = stochastic)
   seeds <- N * p_flower * n_fruits * p_poll * p_germ * p_s1
   if (stochastic) {
     rpois(1, lambda = max(seeds, 0))
@@ -134,27 +128,12 @@ reproduce <- function(N, s,
 # canopy-openness coefficient (Cionco 1972: a ~ 0.02 open pine forest to
 # a ~ 4 dense grass; Murren & Ellison 1998, calibrated for epiphytic orchid
 # seed dispersal specifically: a = 2.14 +/- 0.155).
-# CORRECTED 2026-07-28: the exponent was previously coded as -(a*height/canopy_z),
-# which gives full wind speed at the ground (h=0) and maximal attenuation at
-# the canopy top (h=z) -- backwards relative to both the physical process and
-# Cionco (1972)/Murren & Ellison (1998) eqn 7. Corrected to a*(h - canopy_z)/canopy_z.
-# `a` itself (passed in from init_colonization()) was rescaled from
-# a = 23*(1 - difrac) to a = 4*difrac -- bounded to Cionco's actual 0-4
-# range instead of an uncited 0-23 range, and the direction was flipped:
-# denser canopy (higher diffuse radiation fraction, difrac) -> higher a
-# (more wind attenuation), consistent with Cionco's own dense-canopy
-# examples, rather than the previous (backwards) open-canopy-at-high-difrac
-# assumption. At difrac = 0.5, a = 2, close to Murren & Ellison's a = 2.14.
-# Motzer (2005), measuring wind attenuation in a southern-Ecuador montane
-# forest similar to our study system, found comparatively efficient
-# turbulent mixing and low wind deceleration within the canopy --
-# qualitatively consistent with a value on the lower-moderate end of
-# Cionco's range rather than the dense-canopy extreme (a -> 4).
+
 # TODO: still not a TMCF-specific calibrated value (Murren & Ellison's
 # a=2.14 is from a mangrove system); revisit if a wind-specific source for
 # cloud forest canopies turns up. A more mechanistic alternative (LAD-based
 # first-order closure, Song et al. 2021) exists but requires vertical leaf
-# area density data we don't currently have -- flagged for future work,
+# area density data I don't currently have -- flagged for future work,
 # not adopted here.
 # Sources: Murren & Ellison (1998), Cionco (1972) [wind attenuation term];
 #          Motzer (2005) [qualitative TMCF wind context];
@@ -180,11 +159,6 @@ reproduce <- function(N, s,
 disperse <- function(x, y, z, seeds, clim, height, canopy_z, a,
                      lambda = 1, Ut = 1, maxDisp = 5, maxDispZ = 5, Disp,
                      stochastic = FALSE, wind_override = NULL) {
-  # wind_override: a per-voxel stochastic windspeed draw (see
-  # run_pass1_disperse()'s wind_by_height / .clim_voxel_slice()), used in
-  # place of clim's flat height-mean when available; winddir has no per-pixel
-  # raster structure (it's a single site-wide ERA5 annual mean -- see
-  # lookup_climate_by_height()), so it always stays the clim-table mean.
   wind <- if (!is.null(wind_override) && is.finite(wind_override)) wind_override else mean(clim$windspeed, na.rm = TRUE)
   winddir <- mean(clim$winddir, na.rm = TRUE)
   meanDisp <- max(1, min(round((wind * exp(a * (height - canopy_z) / canopy_z)) /
@@ -208,11 +182,9 @@ microenv_heights <- function(microenv) {
 }
 
 # Load one height tier's raw tmax/tmin rasters.
-# New-format microenv objects (run_microclimate_site.R) only carry a manifest
+# Microenv objects (run_microclimate_site.R) only carry a manifest
 # — heights (.heights) and a directory (.height_dir) of per-height RDS files
-# on scratch, saved this way because loading every height into memory at once
-# needs hundreds of GB. Old-format microenv objects still embed each height's
-# data directly as a list element named "h<value>".
+# on scratch, saved this way for computational efficiency.
 load_height <- function(microenv, height) {
   if (!is.null(microenv$.height_dir)) {
     avail <- microenv$.heights
@@ -230,103 +202,47 @@ load_height <- function(microenv, height) {
 }
 
 # Build the climate data frame for one height tier.
-# Spatial mean across the raster at that height → one value per timestep.
+# Spatially averaged across the raster at that height -> one value per
+# hourly timestep. Reads the pre-averaged hourly-mean fields
+# (temp_mean/relhum_mean/windspeed_mean/Rdirdown_mean/Rdifdown_mean) written
+# by run_microclimate_site.R's write-time reduction -- every microenv_*.rds
+# height file on disk carries these directly (spatially averaged once, at
+# write time, instead of from a raw per-pixel array at every read); this
+# pathway was already spatially flattened by design (it never needed
+# per-pixel resolution), so nothing is lost by moving the averaging step
+# earlier.
 #
-# Two on-disk height-file formats exist, detected via presence of h$tme:
-#   NEW (run_microclimate_site.R, full-year rewrite): flat list with a
-#     genuine POSIXct timestamp vector h$tme (one per hourly array slice,
-#     ~8760 for a full year) alongside Tz/relhum/windspeed/Rdirdown/Rdifdown.
-#     No day-type split -- calendar month comes directly from h$tme.
-#   OLD (pre-rewrite microenv objects still on disk / in scratch as of
-#     2026-07-31): each height nests two day-type blocks, h$tmax and h$tmin,
-#     produced by microclimf::subsetpointmodela(tstep="month") + runmicro()
-#     -- 12 monthly representative days x 24 hourly values = 288 steps,
-#     concatenated in month order (Jan..Dec), no real timestamps. Kept here
-#     because every microenv_*.rds manifest that exists on disk right now
-#     still points to old-format scratch files; this branch stays live until
-#     they're all regenerated.
-# Older-still microenv objects with just one representative day (24 steps,
-# no month structure) fall back to reusing that day for every month. Macro
-# variables (precip, winddir) come from microenv$.weather (ERA5 hourly),
-# replicated across every row (annual mean, not month-resolved).
+# Macro variables (precip, winddir) come from microenv$.weather (ERA5
+# hourly). precip is binned by calendar month from the weather record's own
+# hourly timestamps and mapped onto each row via its month tag -- like
+# temp/relhum/swdown above -- rather than collapsed to one site-wide mean
+# replicated across every row regardless of season. winddir stays a single
+# site-wide annual mean: it only feeds Pass 1's dispersal step
+# (run_pass1_disperse()), which has no monthly loop, so a month-resolved
+# wind direction would have nothing to attach to.
 lookup_climate_by_height <- function(height, microenv) {
   h <- load_height(microenv, height)
   if (is.null(h)) {
     return(NULL)
   }
 
-  .smean <- function(arr) {
-    if (length(dim(arr)) == 3) {
-      apply(arr, 3, mean, na.rm = TRUE)
-    } else {
-      rep(mean(arr, na.rm = TRUE), 24)
-    }
-  }
+  temp <- h$temp_mean
+  relhum <- h$relhum_mean
+  windspeed <- h$windspeed_mean
+  swdown <- h$Rdirdown_mean + h$Rdifdown_mean
+  difrad <- h$Rdifdown_mean
+  month <- as.integer(format(h$tme, "%m"))
+  df <- data.frame(
+    day_type = "annual", month = month, temp = temp, relhum = relhum,
+    windspeed = windspeed, swdown = swdown, difrad = difrad
+  )
 
-  if (!is.null(h$tme)) {
-    # New format: one flat annual hourly series, real POSIXct timestamps.
-    # Month is read directly off each hour's own timestamp -- no positional
-    # inference, no day-type/representative-day bookkeeping needed.
-    temp <- .smean(h$Tz)
-    relhum <- .smean(h$relhum)
-    windspeed <- .smean(h$windspeed)
-    swdown <- .smean(h$Rdirdown) + .smean(h$Rdifdown)
-    difrad <- .smean(h$Rdifdown)
-    month <- as.integer(format(h$tme, "%m"))
-    df <- data.frame(
-      day_type = "annual", month = month, temp = temp, relhum = relhum,
-      windspeed = windspeed, swdown = swdown, difrad = difrad
-    )
-  } else {
-    make_df <- function(slot, day_type) {
-      temp <- .smean(slot$Tz)
-      relhum <- .smean(slot$relhum)
-      windspeed <- .smean(slot$windspeed)
-      swdown <- .smean(slot$Rdirdown) + .smean(slot$Rdifdown)
-      difrad <- .smean(slot$Rdifdown)
-      n <- length(temp)
-      if (n %% 12 == 0 && n > 24) {
-        month <- rep(1:12, each = n / 12)
-      } else {
-        # single representative day (old format) — reuse it for every month
-        month <- rep(1:12, each = n)
-        temp <- rep(temp, 12)
-        relhum <- rep(relhum, 12)
-        windspeed <- rep(windspeed, 12)
-        swdown <- rep(swdown, 12)
-        difrad <- rep(difrad, 12)
-      }
-      data.frame(
-        day_type = day_type, month = month, temp = temp, relhum = relhum,
-        windspeed = windspeed, swdown = swdown, difrad = difrad
-      )
-    }
-    df <- rbind(make_df(h$tmax, "tmax"), make_df(h$tmin, "tmin"))
-  }
-
-  # Append macro variables from the ERA5 weather record (site-wide, not
-  # height-resolved). precip is binned by calendar month from the weather
-  # record's own hourly timestamps and mapped onto each row via its month
-  # tag -- like temp/relhum/swdown above -- rather than collapsed to one
-  # site-wide mean replicated across every row regardless of season.
-  # Downstream, precip is only ever consumed as an annual total
-  # (precip_annual in run_pass3_survive_grow(), which averages this column
-  # back across the full year and multiplies by 8760h -- see methods.tex,
-  # Stage transitions), so this changes HOW that annual figure is built (a
-  # genuine seasonal average instead of one blanket mean) without changing
-  # what it represents. winddir stays a single site-wide annual mean: it
-  # only feeds Pass 1's dispersal step (run_pass1_disperse()), which has no
-  # monthly loop, so a month-resolved wind direction would have nothing to
-  # attach to.
   w <- microenv$.weather
   if (!is.null(w) && !is.null(w$obs_time)) {
     precip_by_month <- tapply(w$precip, format(w$obs_time, "%m"), mean, na.rm = TRUE)
     df$precip <- as.numeric(precip_by_month[sprintf("%02d", df$month)])
     df$winddir <- mean(w$winddir, na.rm = TRUE)
   } else if (!is.null(w)) {
-    # Older microenv objects (or any weather record without a usable
-    # timestamp column) -- fall back to the previous single-annual-mean
-    # behavior for precip too, rather than erroring.
     df$precip <- mean(w$precip, na.rm = TRUE)
     df$winddir <- mean(w$winddir, na.rm = TRUE)
   } else {
@@ -366,9 +282,8 @@ build_clim_cache <- function(microenv) {
 }
 
 # ── Per-voxel stochastic climate ("voxel" cache) ──────────────────────────────
-# Companion to lookup_climate_by_height()/build_clim_cache() above. Instead of collapsing every
-# hourly raster slice into ONE spatially-averaged scalar shared by every voxel
-# at a height, this keeps per-pixel resolution: for each raster pixel actually
+# Companion to lookup_climate_by_height()/build_clim_cache() above.
+# It keeps the resolution of the landscape, and for each raster pixel actually
 # covered by the landscape footprint, each calendar month, and each daypart
 # (day/night, split per pixel per hour via Rdirdown+Rdifdown > 0 -- this
 # already reflects topographic/canopy shading computed by microclimf, so it's
@@ -413,6 +328,18 @@ QUANTILE_PROBS <- c(0.05, 0.25, 0.50, 0.75, 0.95)
   )
 }
 
+# Inverse of .lonlat_to_pixel() -- lon/lat of a pixel's center. Used by
+# voxel_background_table() below to synthesize "observation" points at each
+# footprint pixel so the background pool can be built through the same
+# per-point lookup path as real presence observations.
+.pixel_to_lonlat <- function(row, col, sp) {
+  ext <- sp$ext
+  list(
+    lon = ext[["xmin"]] + (col - 0.5) / sp$ncol * (ext[["xmax"]] - ext[["xmin"]]),
+    lat = ext[["ymax"]] - (row - 0.5) / sp$nrow * (ext[["ymax"]] - ext[["ymin"]])
+  )
+}
+
 # Empirical-quantile inverse-CDF draw -- same interpolation trick
 # niche_axis_score() (below) already uses for its own lookup-table
 # interpolation. `q` is a length-5 vector aligned to QUANTILE_PROBS; NA in,
@@ -430,18 +357,8 @@ QUANTILE_PROBS <- c(0.05, 0.25, 0.50, 0.75, 0.95)
   approx(QUANTILE_PROBS, q, xout = runif(1), rule = 2)$y
 }
 
-# Per-pixel quantiles of one variable, for one (month, daypart) selection, for
-# the small set of footprint pixels actually used by the landscape -- NOT the
-# whole raster. `var_arr`/`day_arr` are the full (nrow, ncol, ntime) arrays --
-# for a new-format height file, straight from its flat top level (h$Tz etc.);
-# for an old-format one, from one of its two day-type blocks (h$tmax or
-# h$tmin). `month_sel` is a logical
-# mask over the time dimension for one calendar month; `want_day` selects the
-# daytime (Rdirdown+Rdifdown>0), nighttime, or "both" (no daypart filter --
-# used for windspeed, which isn't day/night-specific) half of those hours.
-# `pixels` is a data frame of unique (row, col) pairs. Returns a named list
-# keyed by "<row>_<col>", each a length-5 quantile vector (or NA x5 if that
-# pixel/month/daypart has no finite observations).
+# `day_arr` selector -- day (Rdirdown+Rdifdown>0), night, or "both" (no
+# filter -- used for windspeed, which isn't day/night-specific).
 .daypart_mask <- function(day_arr, daypart) {
   switch(daypart,
     day = day_arr > 0,
@@ -451,237 +368,197 @@ QUANTILE_PROBS <- c(0.05, 0.25, 0.50, 0.75, 0.95)
   )
 }
 
-.pixel_quantiles <- function(var_arr, day_arr, month_sel, daypart, pixels) {
-  out <- vector("list", nrow(pixels))
-  names(out) <- paste(pixels$row, pixels$col, sep = "_")
-  for (i in seq_len(nrow(pixels))) {
-    r <- pixels$row[i]
-    cl <- pixels$col[i]
-    daypart_sel <- .daypart_mask(day_arr[r, cl, ], daypart)
-    sel <- month_sel & daypart_sel
-    v <- var_arr[r, cl, sel]
-    v <- v[is.finite(v)]
-    out[[i]] <- if (length(v) == 0) rep(NA_real_, 5) else stats::quantile(v, QUANTILE_PROBS, na.rm = TRUE, names = FALSE)
-  }
-  out
-}
+# Vectorized per-pixel, per-month, per-daypart quantile reduction -- computes,
+# for EVERY pixel in the raster (not a landscape-restricted footprint; that
+# doesn't exist yet at this point, see run_microclimate_site.R), the same 5
+# empirical percentiles get_clim_voxel() used to compute lazily at
+# model-run time. Moved here (called at WRITE time, right after
+# microclimf::runmicro()) so the raw hourly per-pixel arrays never touch
+# disk -- only this reduced output does.
+#
+# `h` is an mout-shaped list ($Tz, $relhum, $windspeed, $Rdirdown, $Rdifdown,
+# $tme) -- exactly microclimf::runmicro()'s own return shape, so this can be
+# called directly on `mout`. `nr`/`nc` are the output arrays' own raster
+# dimensions (dim(h$Tz)[1:2]).
+#
+# Storage/computation strategy deliberately differs from the pre-2026-08-05
+# get_clim_voxel() (which this replaces): that version looped over each
+# footprint pixel (a few hundred to a few thousand, in a single
+# colonization run) and inserted one named-list entry per (pixel, month,
+# daypart, variable) key. At full-raster pixel counts (~140,000 for a
+# typical site here) that pattern is ~20 million individual named-list
+# insertions and ~20 million individual stats::quantile() calls --
+# impractical in both time and memory. Same math (QUANTILE_PROBS,
+# .daypart_mask(), day/night/both grouping), reused verbatim; only the
+# computation/storage shape changes:
+#   - each variable's (nr, nc, ntime) array is reshaped ONCE to an
+#     (nr*nc, ntime) matrix (column-major, so pixel index = (col-1)*nr+row,
+#     matching .lonlat_to_pixel()'s row/col convention) instead of re-sliced
+#     per (month, daypart) combination;
+#   - "both"-daypart variables (windspeed, and temp/relhum's day+night-
+#     pooled variant -- see get_clim_voxel()'s header) don't need a
+#     per-pixel-varying time mask, so their quantiles are fully vectorized
+#     via one apply() call across all pixels per (month, variable);
+#   - day/night-specific variables (swdown, difrad, temp, relhum) DO need a
+#     per-pixel mask (day_arr/shading varies spatially -- this is exactly
+#     the spatial detail this whole system exists to preserve, so it can't
+#     be shared across pixels), so this part stays a per-pixel loop, but
+#     writes into a preallocated (npix, 5) matrix per (month, daypart, var)
+#     key instead of growing a named list one small vector at a time --
+#     the actual source of the old approach's impracticality at this scale.
+# Returns list(mode = "pixel", nr =, nc =, quantiles = <named list keyed
+# "<month>_<daypart>_<var>", each a (nr*nc, 5) matrix, row i = pixel i in
+# the column-major layout above>).
+.compute_voxel_quantiles <- function(h, nr, nc) {
+  npix <- nr * nc
+  ntime <- dim(h$Tz)[3]
+  day_arr <- h$Rdirdown + h$Rdifdown
+  month_of_t <- as.integer(format(h$tme, "%m"))
+  months <- c(as.character(1:12), "annual")
+  month_sel_by <- setNames(lapply(months, function(m) {
+    if (m == "annual") rep(TRUE, ntime) else month_of_t == as.integer(m)
+  }), months)
 
-# Pooled (whole-raster) quantiles of one variable, for one (month, daypart)
-# selection -- the fallback used when per-pixel resolution isn't available.
-# `var_arr`/`day_arr` may be 3-D (row, col, time) or, for old single-
-# representative-day microenv objects, flat (time only).
-.pooled_quantiles <- function(var_arr, day_arr, month_sel, daypart) {
-  if (length(dim(var_arr)) == 3) {
-    time_sel <- which(month_sel)
-    if (length(time_sel) == 0) {
-      return(rep(NA_real_, 5))
-    }
-    sub_var <- var_arr[, , time_sel, drop = FALSE]
-    sub_day <- day_arr[, , time_sel, drop = FALSE]
-    daypart_mask <- .daypart_mask(sub_day, daypart)
-    v <- sub_var[daypart_mask]
-  } else {
-    daypart_mask <- .daypart_mask(day_arr, daypart)
-    v <- var_arr[month_sel & daypart_mask]
-  }
-  v <- v[is.finite(v)]
-  if (length(v) == 0) rep(NA_real_, 5) else stats::quantile(v, QUANTILE_PROBS, na.rm = TRUE, names = FALSE)
-}
+  to_mat <- function(arr) matrix(arr, nrow = npix, ncol = ntime)
+  day_mat <- to_mat(day_arr)
+  daynight_mats <- list(
+    swdown = day_mat, difrad = to_mat(h$Rdifdown),
+    temp = to_mat(h$Tz), relhum = to_mat(h$relhum)
+  )
+  both_mats <- list(
+    windspeed = to_mat(h$windspeed),
+    temp = daynight_mats$temp, relhum = daynight_mats$relhum
+  )
 
-# Per-height voxel climate cache: empirical quantiles per (month, daypart,
-# variable), per-pixel when `footprint` (a data frame of unique row/col pixels
-# actually covered by the landscape, from init_colonization()) is supplied and
-# microenv$.spatial is usable, otherwise one pooled table for the whole
-# raster. Mirrors lookup_climate_by_height()'s new-vs-old format detection
-# (h$tme present -> flat full-year series with real timestamps; absent ->
-# old tmax/tmin day-type blocks) but keeps day/night and (when possible)
-# spatial resolution instead of collapsing them.
-get_clim_voxel <- function(height, microenv, footprint = NULL) {
-  h <- load_height(microenv, height)
-  if (is.null(h)) {
-    return(NULL)
-  }
-
-  if (!is.null(h$tme)) {
-    # New format: single flat annual hourly array, real timestamps -- no
-    # tmax/tmin split, so no day-type loop and no "_tmax"/"_tmin" key
-    # suffix (build_clim_cache_voxel() detects this and skips combining).
-    pixel_mode <- .spatial_extent_usable(microenv) && !is.null(footprint) &&
-      nrow(footprint) > 0 && length(dim(h$Tz)) == 3
-    quantiles <- list()
-    day_arr <- h$Rdirdown + h$Rdifdown
-    ntime <- if (length(dim(h$Tz)) == 3) dim(h$Tz)[3] else length(h$Tz)
-    month_of_t <- as.integer(format(h$tme, "%m"))
-    months_present <- c(as.character(1:12), "annual")
-    swdown_arr <- h$Rdirdown + h$Rdifdown
-    daynight_vars <- list(swdown = swdown_arr, difrad = h$Rdifdown, temp = h$Tz, relhum = h$relhum)
-    both_vars <- list(windspeed = h$windspeed)
-
-    for (month in months_present) {
-      month_sel <- if (month == "annual") rep(TRUE, ntime) else month_of_t == as.integer(month)
-      for (daypart in c("day", "night")) {
-        for (vname in names(daynight_vars)) {
-          if (pixel_mode) {
-            pix_q <- .pixel_quantiles(daynight_vars[[vname]], day_arr, month_sel, daypart, footprint)
-            for (pk in names(pix_q)) {
-              quantiles[[sprintf("%s_%s_%s_%s", pk, month, daypart, vname)]] <- pix_q[[pk]]
-            }
-          } else {
-            quantiles[[sprintf("pooled_%s_%s_%s", month, daypart, vname)]] <- .pooled_quantiles(
-              daynight_vars[[vname]], day_arr, month_sel, daypart
-            )
-          }
-        }
-      }
-      for (vname in names(both_vars)) {
-        if (pixel_mode) {
-          pix_q <- .pixel_quantiles(both_vars[[vname]], day_arr, month_sel, "both", footprint)
-          for (pk in names(pix_q)) {
-            quantiles[[sprintf("%s_%s_%s_%s", pk, month, "both", vname)]] <- pix_q[[pk]]
-          }
-        } else {
-          quantiles[[sprintf("pooled_%s_%s_%s", month, "both", vname)]] <- .pooled_quantiles(
-            both_vars[[vname]], day_arr, month_sel, "both"
-          )
-        }
-      }
-    }
-    return(list(mode = if (pixel_mode) "pixel" else "pooled", quantiles = quantiles))
-  }
-
-  # Old format: tmax/tmin day-type blocks, no real timestamps.
-  pixel_mode <- .spatial_extent_usable(microenv) && !is.null(footprint) &&
-    nrow(footprint) > 0 && length(dim(h$tmax$Tz)) == 3
+  # 2026-08-10: rewritten from a per-row/per-pixel apply()/quantile() loop
+  # to matrixStats::rowQuantiles() -- verified numerically identical
+  # (including NaN/Inf/NA-pattern edge cases and dead-pixel rows) against
+  # the original implementation before this change, see
+  # /tmp/test_matrixstats_equivalence.R from that verification pass.
+  #
+  # matrixStats' na.rm only drops literal NA, not NaN/Inf -- the original
+  # .qrow() dropped all non-finite values via v[is.finite(v)], so convert
+  # non-finite entries to NA up front to reproduce that exactly.
+  clean <- function(mat) { mat[!is.finite(mat)] <- NA_real_; mat }
 
   quantiles <- list()
 
-  for (day_type in c("tmax", "tmin")) {
-    slot <- h[[day_type]]
-    day_arr <- slot$Rdirdown + slot$Rdifdown
-    n <- length(slot$Tz)
-    ntime <- if (length(dim(slot$Tz)) == 3) dim(slot$Tz)[3] else n
-    if (ntime %% 12 == 0 && ntime > 24) {
-      month_of_t <- rep(1:12, each = ntime / 12)
-    } else {
-      # single representative day (old format) -- reused for every month
-      month_of_t <- rep(1, ntime)
-    }
-    # "annual" is a 13th pseudo-month pooling every hour across the whole year
-    # -- Pass 1 (dispersal) and Pass 2 (establishment) use one shared annual
-    # table, matching their existing use of clim_by_height (not clim_month_
-    # by_height) for those same variables.
-    months_present <- c(as.character(1:12), "annual")
-
-    for (month in months_present) {
-      month_sel <- if (month == "annual") {
-        rep(TRUE, ntime)
-      } else if (ntime %% 12 == 0 && ntime > 24) {
-        month_of_t == as.integer(month)
+  # "both": no per-pixel-varying mask needed -- one shared column subset per
+  # month, fully vectorized across all pixels via rowQuantiles().
+  for (vname in names(both_mats)) {
+    mat <- clean(both_mats[[vname]])
+    for (m in months) {
+      cols <- which(month_sel_by[[m]])
+      quantiles[[sprintf("%s_both_%s", m, vname)]] <- if (length(cols) == 0) {
+        matrix(NA_real_, npix, 5)
       } else {
-        rep(TRUE, ntime) # old single-day format: every month reuses the one day
-      }
-      swdown_arr <- slot$Rdirdown + slot$Rdifdown
-      # temp/relhum/swdown/difrad: day- and night-specific quantiles (the
-      # variables that actually feed day/night-sensitive survival/establishment
-      # terms). windspeed: pooled day+night only ("both") -- wind-driven seed
-      # release (Pass 1 dispersal) isn't day-specific, per the plan.
-      daynight_vars <- list(swdown = swdown_arr, difrad = slot$Rdifdown, temp = slot$Tz, relhum = slot$relhum)
-      both_vars <- list(windspeed = slot$windspeed)
-
-      for (daypart in c("day", "night")) {
-        for (vname in names(daynight_vars)) {
-          if (pixel_mode) {
-            pix_q <- .pixel_quantiles(daynight_vars[[vname]], day_arr, month_sel, daypart, footprint)
-            for (pk in names(pix_q)) {
-              quantiles[[sprintf("%s_%s_%s_%s_%s", pk, month, daypart, vname, day_type)]] <- pix_q[[pk]]
-            }
-          } else {
-            quantiles[[sprintf("pooled_%s_%s_%s_%s", month, daypart, vname, day_type)]] <- .pooled_quantiles(
-              daynight_vars[[vname]], day_arr, month_sel, daypart
-            )
-          }
-        }
-      }
-      for (vname in names(both_vars)) {
-        if (pixel_mode) {
-          pix_q <- .pixel_quantiles(both_vars[[vname]], day_arr, month_sel, "both", footprint)
-          for (pk in names(pix_q)) {
-            quantiles[[sprintf("%s_%s_%s_%s_%s", pk, month, "both", vname, day_type)]] <- pix_q[[pk]]
-          }
-        } else {
-          quantiles[[sprintf("pooled_%s_%s_%s_%s", month, "both", vname, day_type)]] <- .pooled_quantiles(
-            both_vars[[vname]], day_arr, month_sel, "both"
-          )
-        }
+        matrixStats::rowQuantiles(mat[, cols, drop = FALSE], probs = QUANTILE_PROBS, na.rm = TRUE)
       }
     }
   }
 
-  list(mode = if (pixel_mode) "pixel" else "pooled", quantiles = quantiles)
+  # day/night: mask varies per pixel (topographic/canopy shading). day_mat
+  # itself can be NaN/Inf (Rdirdown/Rdifdown are model outputs, not
+  # guaranteed finite), so `day_mat > 0` can be NA rather than TRUE/FALSE
+  # at those cells -- the original per-pixel loop excluded such cells from
+  # BOTH day and night (msel & NA propagates to NA, which .qrow()'s
+  # is.finite() filter then dropped). Reproduce that explicitly with
+  # is_day_ok/is_night_ok below, rather than relying on how
+  # `mat[logical_with_NA] <- x` resolves NA positions in assignment.
+  is_day_raw  <- day_mat > 0
+  is_day_ok   <- is_day_raw; is_day_ok[is.na(is_day_ok)]     <- FALSE
+  is_night_ok <- !is_day_raw; is_night_ok[is.na(is_night_ok)] <- FALSE
+
+  for (vname in names(daynight_mats)) {
+    base <- clean(daynight_mats[[vname]])
+
+    # One masked (npix, ntime) copy at a time, not held simultaneously for
+    # all 4 vars x 2 dayparts -- bounds this rewrite's extra peak memory
+    # to ~1 full array (not 8), given .compute_voxel_quantiles() already
+    # runs inside a memory-constrained mclapply worker (see
+    # run_microclimate_site.R's per-height loop).
+    mat_day <- base
+    mat_day[!is_day_ok] <- NA_real_
+    for (m in months) {
+      cols <- which(month_sel_by[[m]])
+      quantiles[[sprintf("%s_day_%s", m, vname)]] <-
+        matrixStats::rowQuantiles(mat_day[, cols, drop = FALSE], probs = QUANTILE_PROBS, na.rm = TRUE)
+    }
+    rm(mat_day)
+
+    mat_night <- base
+    mat_night[!is_night_ok] <- NA_real_
+    for (m in months) {
+      cols <- which(month_sel_by[[m]])
+      quantiles[[sprintf("%s_night_%s", m, vname)]] <-
+        matrixStats::rowQuantiles(mat_night[, cols, drop = FALSE], probs = QUANTILE_PROBS, na.rm = TRUE)
+    }
+    rm(mat_night, base)
+  }
+
+  list(mode = "pixel", nr = nr, nc = nc, quantiles = quantiles)
 }
 
-# Combine the tmax/tmin quantile entries written by get_clim_voxel() (one per
-# day_type) into a single quantile per (pixel-or-pooled, month, daypart,
-# variable), pooling both day-types' raw observations before taking
-# quantiles would require keeping every raw value in memory; instead this
-# pools the two day-types' quantile *sets* by concatenating the underlying
-# probabilities and re-interpolating -- a reasonable approximation given
-# tmax/tmin already both feed the same representative-day design, and this
-# keeps the cache to 5 numbers/entry instead of retaining raw hourly data.
-.combine_daytype_quantiles <- function(q_tmax, q_tmin) {
-  if (is.null(q_tmax) || anyNA(q_tmax)) {
-    return(q_tmin)
+# Per-height voxel climate reader. The quantile reduction itself now happens
+# once, at write time, in run_microclimate_site.R (.compute_voxel_
+# quantiles(), above) -- this function just loads the already-reduced
+# `h$voxel_quantiles` and, if `footprint` (a data frame of unique row/col
+# pixels actually covered by one colonization run's landscape, from
+# init_colonization()) is supplied, subsets every quantile matrix down to
+# just those pixels. Subsetting matters purely for MEMORY at model-run time
+# -- computation already happened for the whole raster once at write time,
+# but a single run's state$clim_cache_voxel shouldn't hold every height
+# tier's full-raster quantile matrix (hundreds of MB each) simultaneously
+# when a run only ever touches its own landscape's pixels.
+get_clim_voxel <- function(height, microenv, footprint = NULL) {
+  h <- load_height(microenv, height)
+  if (is.null(h) || is.null(h$voxel_quantiles)) {
+    return(NULL)
   }
-  if (is.null(q_tmin) || anyNA(q_tmin)) {
-    return(q_tmax)
+  vq <- h$voxel_quantiles
+  npix <- vq$nr * vq$nc
+  if (is.null(footprint) || nrow(footprint) == 0) {
+    return(list(
+      mode = vq$mode, nr = vq$nr, nc = vq$nc,
+      footprint_full_idx = seq_len(npix), quantiles = vq$quantiles
+    ))
   }
-  stats::quantile(c(q_tmax, q_tmin), QUANTILE_PROBS, na.rm = TRUE, names = FALSE)
+  idx <- (footprint$col - 1L) * vq$nr + footprint$row
+  quantiles_sub <- lapply(vq$quantiles, function(m) m[idx, , drop = FALSE])
+  list(mode = vq$mode, nr = vq$nr, nc = vq$nc, footprint_full_idx = idx, quantiles = quantiles_sub)
 }
 
 # Build the full voxel climate cache across every height tier. `footprint`
 # (optional) is a data frame of unique (row, col) raster pixels the landscape
 # actually overlaps -- see init_colonization(), which computes it from the
-# landscape's lon/lat bounding box padded by maxDisp. Omitting it (the default,
-# preserving existing call sites like resolution_diagnostics.R) always falls
-# back to pooled (whole-raster) mode.
+# landscape's lon/lat bounding box padded by maxDisp. Omitting it (e.g.
+# resolution_diagnostics.R, the niche diagnostic scripts) returns every
+# pixel's quantiles unsubset -- full per-pixel resolution either way, just
+# not memory-bounded to one run's landscape.
 build_clim_cache_voxel <- function(microenv, footprint = NULL) {
   heights <- microenv_heights(microenv)
   n_cores <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = 1L)))
   raw <- parallel::mclapply(heights, function(h) get_clim_voxel(h, microenv, footprint), mc.cores = n_cores)
-
-  combined_by_height <- lapply(raw, function(entry) {
-    if (is.null(entry)) {
-      return(NULL)
-    }
-    keys_tmax <- grep("_tmax$", names(entry$quantiles), value = TRUE)
-    if (length(keys_tmax) == 0) {
-      # New-format height file (get_clim_voxel()'s h$tme branch): quantile
-      # keys carry no tmax/tmin suffix -- there's only one day-type to begin
-      # with, so nothing needs combining.
-      return(list(mode = entry$mode, quantiles = entry$quantiles))
-    }
-    out <- list()
-    for (k_tmax in keys_tmax) {
-      base_key <- sub("_tmax$", "", k_tmax)
-      k_tmin <- paste0(base_key, "_tmin")
-      out[[base_key]] <- .combine_daytype_quantiles(entry$quantiles[[k_tmax]], entry$quantiles[[k_tmin]])
-    }
-    list(mode = entry$mode, quantiles = out)
-  })
-  names(combined_by_height) <- as.character(heights)
-  list(heights = heights, clim_voxel_by_height = combined_by_height)
+  names(raw) <- as.character(heights)
+  list(heights = heights, clim_voxel_by_height = raw)
 }
 
-# Look up (and stochastically sample) a per-voxel-or-pooled climate value.
-# `state` must carry `state$clim_cache_voxel` (see init_colonization()) and,
-# for pixel mode, `state$clim_pixel_row`/`state$clim_pixel_col` (xDim x yDim
-# matrices mapping each landscape voxel to its raster pixel). `zi` is the
+# Predicate: does this quantile cache entry actually carry per-pixel data
+# (as opposed to only a pooled/height-wide fallback)? Shared by
+# .clim_voxel_slice() and .voxel_point_quantile(), which previously
+# duplicated this exact compound condition verbatim.
+.voxel_mode_is_pixel <- function(entry, spatial_or_extra) {
+  !is.null(entry$mode) && entry$mode == "pixel" && !is.null(spatial_or_extra)
+}
+
+# Look up (and stochastically sample) a per-voxel climate value. `state`
+# must carry `state$clim_cache_voxel` (see init_colonization()) and
+# `state$clim_pixel_row`/`state$clim_pixel_col` (xDim x yDim matrices
+# mapping each landscape voxel to its raster pixel). `zi` is the
 # height-tier index; `month` is 1:12 or "annual" (Pass 1/2 use one shared
 # annual table, matching their existing use of clim_by_height rather than
 # clim_month_by_height); `daypart` is "day" or "night"; `var` is one of temp/
-# relhum/windspeed/swdown/difrad. Returns an (xDim x yDim) matrix (pixel mode)
-# or a scalar (pooled mode), broadcasting naturally in the pass functions'
-# elementwise arithmetic either way.
+# relhum/windspeed/swdown/difrad. Returns an (xDim x yDim) matrix.
 .clim_voxel_slice <- function(state, zi, month, daypart, var, stochastic = FALSE) {
   cache <- state$clim_cache_voxel
   if (is.null(cache)) {
@@ -694,26 +571,28 @@ build_clim_cache_voxel <- function(microenv, footprint = NULL) {
   }
   month_key <- if (identical(month, "annual")) "annual" else as.character(month)
 
-  if (entry$mode == "pooled" || is.null(state$clim_pixel_row)) {
+  if (!.voxel_mode_is_pixel(entry, state$clim_pixel_row)) {
+    # Defensive fallback -- not expected in practice (every microenv written
+    # under the new format carries real per-pixel data unconditionally), but
+    # kept rather than erroring outright if microenv$.spatial ever isn't a
+    # usable plain-vector extent.
     q <- entry$quantiles[[sprintf("pooled_%s_%s_%s", month_key, daypart, var)]]
     return(.sample_quantile(q, stochastic))
   }
 
   xDim <- state$xDim
   yDim <- state$yDim
-  out <- matrix(NA_real_, xDim, yDim)
-  pixel_keys <- paste(state$clim_pixel_row, state$clim_pixel_col, sep = "_")
-  unique_keys <- unique(pixel_keys)
+  q_mat <- entry$quantiles[[sprintf("%s_%s_%s", month_key, daypart, var)]]
+  pixel_idx <- (as.vector(state$clim_pixel_col) - 1L) * entry$nr + as.vector(state$clim_pixel_row)
+  pos <- match(pixel_idx, entry$footprint_full_idx)
+  unique_pos <- unique(pos)
   # One stochastic draw per raster pixel, broadcast to every voxel sharing it
   # -- voxels sharing a pixel share the same real hourly climate record, so
   # each should draw once, not independently (they'd otherwise decorrelate
   # climate between voxels the real raster never distinguished).
-  draws <- vapply(unique_keys, function(pk) {
-    q <- entry$quantiles[[sprintf("%s_%s_%s_%s", pk, month_key, daypart, var)]]
-    .sample_quantile(q, stochastic)
-  }, numeric(1))
-  out[] <- draws[pixel_keys]
-  out
+  draws <- vapply(unique_pos, function(p) .sample_quantile(q_mat[p, ], stochastic), numeric(1))
+  names(draws) <- as.character(unique_pos)
+  matrix(draws[as.character(pos)], xDim, yDim)
 }
 
 # Broadcast a .clim_voxel_slice() result (scalar in pooled mode, an xDim x
@@ -721,8 +600,30 @@ build_clim_cache_voxel <- function(microenv, footprint = NULL) {
 # non-finite entries (a pixel/month/daypart with no observations) with
 # `fallback` -- keeps downstream arithmetic finite instead of propagating NA
 # into rbinom()/survival_logit().
+# 2026-08-23: fixed a real crash traced from the founder_number sweep's
+# first-ever colonization run against 0.4m/subsampled microenv data
+# (job 27106698 -- "NAs are not allowed in subscripted assignments" in
+# run_pass3_survive_grow(), traced via debug_founder_crash2.R to
+# survival_logit() silently returning numeric(0)). Root cause:
+# `mat_or_scalar` can be length-0 (.clim_voxel_slice() returning a
+# zero-length vector for some pixel/month/daypart combination this
+# function's own header comment already anticipates as possible -- "a
+# pixel/month/daypart with no observations") -- but the old branching
+# (`length > 1` vs implicit-else) silently treated length-0 as the
+# "scalar" case, where `if (is.finite(mat_or_scalar))` on a length-0
+# input evaluates to `if(logical(0))`, and R's arithmetic then silently
+# propagates that zero length through survival_logit() instead of the
+# documented full xDim x yDim finite matrix -- confirmed by
+# range(numeric(0)) == c(Inf, -Inf), the exact signature this crash's
+# survive_prob_A showed. Also guard `fallback` itself being non-finite
+# (e.g. mean() of an all-non-finite climate column), so this function's
+# one documented job -- guarantee a finite xDim x yDim matrix -- actually
+# holds in every input case, not just the common ones.
 .fill_na <- function(mat_or_scalar, fallback, xDim, yDim) {
-  if (length(mat_or_scalar) > 1) {
+  if (!is.finite(fallback)) fallback <- 0
+  if (length(mat_or_scalar) == 0) {
+    matrix(fallback, xDim, yDim)
+  } else if (length(mat_or_scalar) > 1) {
     out <- mat_or_scalar
     out[!is.finite(out)] <- fallback
     out
@@ -769,19 +670,6 @@ build_clim_cache_voxel <- function(microenv, footprint = NULL) {
 NICHE_VARS <- c("temp", "relhum", "swdown")
 NICHE_GRID_N <- 512
 
-# Mean of variable `v` in climate table `cl`. swdown drops zero/night-time
-# readings first, consistent with every other swdown use in this file
-# (run_pass2_establish(), survival_logit(), .niche_matching_canopy()) — a
-# mean that included every dark hour would just be diluted by a fixed
-# day/night ratio rather than reflecting daytime irradiance. temp/relhum use
-# every reading.
-.niche_var_mean <- function(cl, v) {
-  if (identical(v, "swdown")) {
-    return(mean(cl[[v]][cl[[v]] > 0], na.rm = TRUE))
-  }
-  mean(cl[[v]], na.rm = TRUE)
-}
-
 # Kernel density of `vals` on a shared grid spanning [from, to]. density()'s
 # own default bandwidth extension already tapers close to zero near both
 # ends, so no separate hard threshold is needed on top of it.
@@ -789,10 +677,10 @@ NICHE_GRID_N <- 512
   vals <- vals[is.finite(vals)]
   if (length(vals) < 2 || diff(range(vals)) == 0) {
     # Degenerate (every value identical, or a single point): fall back to a
-    # one-cell spike at that value so the ratio below stays well-defined.
-    x <- seq(from, to, length.out = n)
-    y <- as.numeric(abs(x - mean(vals)) <= (to - from) / n)
-    return(list(x = x, y = y))
+    # one-cell spike at that value so the density_ratio below stays well-defined.
+    grid_x <- seq(from, to, length.out = n)
+    y <- as.numeric(abs(grid_x - mean(vals)) <= (to - from) / n)
+    return(list(x = grid_x, y = y))
   }
   d <- density(vals, from = from, to = to, n = n)
   list(x = d$x, y = d$y)
@@ -803,54 +691,206 @@ NICHE_GRID_N <- 512
 # list with one column per variable) — the "available but not necessarily
 # occupied" reference every species' presence values are scored against.
 build_background_density <- function(bg_vals, vars = NICHE_VARS, n = NICHE_GRID_N) {
-  setNames(lapply(vars, function(v) {
-    x <- bg_vals[[v]][is.finite(bg_vals[[v]])]
-    .density_grid(x, min(x), max(x), n)
+  if (is.matrix(bg_vals)) bg_vals <- as.data.frame(bg_vals)
+
+  setNames(lapply(vars, function(clim_var) {
+    vals <- bg_vals[[clim_var]]
+    vals <- vals[is.finite(vals)]
+    .density_grid(vals, min(vals), max(vals), n)
   }), vars)
 }
 
 # Per-species niche model: for each variable, the presence/background
-# density ratio on the background's own grid, normalized so its own peak is
-# 100. clim_vals: matrix of observed values, rows = observations, one column
-# per variable in `vars`.
+# density ratio (density_ratio()) on the background's own grid, normalized
+# so its own peak is 100 (axis_score). clim_vals: matrix of observed values,
+# rows = observations, one column per variable in `vars`.
+#
+# Matches methods.tex Eq.~\ref{eq:nicheratio}: density_ratio(clim_var, loc) =
+# presence_density(clim_var, loc) / max(background_density(clim_var, loc), 1e-8);
+# axis_score(clim_var, loc) = 100 * density_ratio / max(density_ratio).
+# presence_density()/background_density() are both the same Gaussian KDE
+# (Eq.~\ref{eq:kde}, .density_grid() above) applied to two different samples.
 niche_density_model <- function(clim_vals, bg_density, vars = NICHE_VARS) {
-  axes <- setNames(lapply(vars, function(v) {
-    bg <- bg_density[[v]]
-    pres <- .density_grid(clim_vals[, v], min(bg$x), max(bg$x), length(bg$x))
-    ratio <- pres$y / pmax(bg$y, 1e-8)
-    ratio[!is.finite(ratio)] <- 0
-    score <- if (max(ratio) > 0) 100 * ratio / max(ratio) else rep(0, length(ratio))
-    list(x = bg$x, score = score)
+  axes <- setNames(lapply(vars, function(clim_var) {
+    background_density <- bg_density[[clim_var]]
+    presence_density <- .density_grid(
+      clim_vals[, clim_var], min(background_density$x), max(background_density$x),
+      length(background_density$x)
+    )
+    density_ratio <- presence_density$y / pmax(background_density$y, 1e-8)
+    density_ratio[!is.finite(density_ratio)] <- 0
+    axis_score <- if (max(density_ratio) > 0) {
+      100 * density_ratio / max(density_ratio)
+    } else {
+      rep(0, length(density_ratio))
+    }
+    list(x = background_density$x, score = axis_score)
   }), vars)
   list(axes = axes)
 }
 
-# Mean climate per height tier (one row per height, one column per variable)
-# — the per-height lookup shared by get_niche()'s this-site fallback and by
-# niche_ceiling()'s per-site rescale below.
-height_clim_scalars <- function(clim_by_height, vars = NICHE_VARS) {
-  do.call(rbind, lapply(clim_by_height, function(cl) {
-    if (is.null(cl)) {
-      return(setNames(rep(NA_real_, length(vars)), vars))
+# ── Per-voxel presence/background adapters ────────────────────────────────────
+# Package get_clim_voxel()/build_clim_cache_voxel()'s per-pixel, per-height,
+# per-month, per-daypart quantile cache into the clim_vals matrix shape
+# niche_density_model() expects (rows = observations, one column per
+# variable in `vars`) -- the missing link between the per-voxel climate
+# system (already driving run_pass2_establish()/run_pass3_survive_grow())
+# and species niche scoring, which previously fell back to
+# height_clim_scalars(), a spatially-flattened, one-row-per-height summary
+# (removed; see git history) that defeated the whole point of per-voxel
+# resolution for the one part of the model where spatial variation matters
+# most.
+#
+# temp/relhum are sampled from get_clim_voxel()'s pooled day+night ("both")
+# quantile -- matching how the old flattened pathway averaged them over
+# every hourly reading -- while swdown stays day-only (get_clim_voxel()
+# never computes a "both" swdown quantile; night irradiance is ~0 by
+# construction, so day-only is both the available and the physically
+# meaningful choice, consistent with every other swdown use in this file:
+# run_pass2_establish(), survival_logit(), .niche_matching_canopy()).
+
+# Single quantile lookup at one lon/lat/height point, `month` (1:12 or
+# "annual") and one variable -- falls back to get_clim_voxel()'s pooled
+# entry (ignoring lon/lat) whenever pixel resolution isn't available at
+# that height (matches .clim_voxel_slice()'s own pooled-vs-pixel fallback).
+#
+# FIXED 2026-08-0X: the "pixel" branch previously looked up
+# entry$quantiles[[sprintf("%d_%d_%s_%s_%s", px$row, px$col, ...)]] -- a
+# per-pixel-keyed format left over from the pre-2026-08-05 get_clim_voxel()
+# (see .compute_voxel_quantiles()'s own header comment, which explicitly
+# replaced that scheme for memory/time reasons). The current writer
+# (.compute_voxel_quantiles()) keys each matrix only by
+# "<month>_<daypart>_<var>" and stores one row per pixel instead, exactly
+# like .clim_voxel_slice() (Pass 2/3's reader) already correctly assumes.
+# This function was never updated to match, so every real (non-pooled)
+# lookup silently returned NA -- confirmed directly via a synthetic-data
+# test (build .compute_voxel_quantiles() output, wrap it as get_clim_voxel()
+# would, call this function, observe the looked-up key never exists).
+# Rewritten below to use the same key + row-position lookup
+# .clim_voxel_slice() uses, adapted for a single point instead of a whole
+# xDim x yDim grid.
+.voxel_point_quantile <- function(entry, sp_spatial, lon, lat, month, daypart, var, stochastic) {
+  month_key <- if (identical(month, "annual")) "annual" else as.character(month)
+  if (is.null(entry)) {
+    return(NA_real_)
+  }
+  if (!.voxel_mode_is_pixel(entry, sp_spatial)) {
+    # Defensive fallback -- mirrors .clim_voxel_slice()'s own "not expected
+    # in practice" branch and its exact key format, for consistency between
+    # the two readers. No writer currently produces a "pooled_..." key
+    # either (a separate, broader question than the row/col mismatch this
+    # fix targets -- see methods.tex Section~\ref{sec:niche}'s CODE notes).
+    q <- entry$quantiles[[sprintf("pooled_%s_%s_%s", month_key, daypart, var)]]
+    return(.sample_quantile(q, stochastic))
+  }
+  q_mat <- entry$quantiles[[sprintf("%s_%s_%s", month_key, daypart, var)]]
+  if (is.null(q_mat)) {
+    return(NA_real_)
+  }
+  # 2026-08-25: fixed a real bug -- voxel_background_table() (below)
+  # synthesizes an NA lon/lat "observation" per height tier specifically to
+  # request "pooled across every pixel" behavior (its own header comment:
+  # "if footprint is NULL, i.e. pooled mode, one row per height tier"), but
+  # this function had no such path for the "pixel" storage mode every real
+  # production microenv actually uses -- .lonlat_to_pixel(NA, NA) can't
+  # match any single pixel, so `pos` was always NA and every call silently
+  # returned NA_real_. Confirmed via diagnostics run against Maquipucuna,
+  # Mashpi, and MindoMirador: height_scalars came back 100% NA for every
+  # height at every site, breaking plot_niche_suitability(),
+  # plot_niche_profile_curves(), and the new plot_niche_suitability_heatmap()
+  # identically (all three read from this same source). Averaging each
+  # quantile position across every pixel row in q_mat (its rows are already
+  # exactly the footprint's valid pixels, per the match()-based single-pixel
+  # lookup below) gives the "typical pixel" quantile vector the pooled-mode
+  # branch above already returns for the other storage mode -- consistent
+  # behavior across both modes for the same NA-coordinates request.
+  if (is.na(lon) || is.na(lat)) {
+    pooled_q <- colMeans(q_mat, na.rm = TRUE)
+    return(.sample_quantile(pooled_q, stochastic))
+  }
+  px <- .lonlat_to_pixel(lon, lat, sp_spatial)
+  pixel_idx <- (px$col - 1L) * entry$nr + px$row
+  pos <- match(pixel_idx, entry$footprint_full_idx)
+  if (is.na(pos)) {
+    return(NA_real_)
+  }
+  .sample_quantile(q_mat[pos, ], stochastic)
+}
+
+# Presence adapter: `obs` is a data frame with `lon`, `lat`, `height`
+# columns, one row per real observation. Each observation contributes one
+# row per element of `months` (default 1:12 -- "a species tolerates whatever
+# seasonal range its occupied height experiences over a year, not just that
+# height's average," matching characterize_niches.R's existing monthly
+# augmentation), each independently sampled from that pixel/height/month's
+# quantiles. `stochastic = FALSE` (default) samples the deterministic median
+# -- the same "today's behavior" default `.sample_quantile()` already uses.
+voxel_climate_table <- function(clim_cache_voxel, microenv, obs, vars = NICHE_VARS,
+                                months = 1:12, stochastic = FALSE) {
+  sp_spatial <- if (.spatial_extent_usable(microenv)) microenv$.spatial else NULL
+  heights <- clim_cache_voxel$heights
+  height_keys <- names(clim_cache_voxel$clim_voxel_by_height)
+  daypart_by_var <- setNames(ifelse(vars == "swdown", "day", "both"), vars)
+
+  rows <- vector("list", nrow(obs) * length(months))
+  k <- 0L
+  for (i in seq_len(nrow(obs))) {
+    zi <- which.min(abs(heights - obs$height[i]))
+    entry <- clim_cache_voxel$clim_voxel_by_height[[height_keys[zi]]]
+    for (month in months) {
+      k <- k + 1L
+      rows[[k]] <- setNames(vapply(vars, function(v) {
+        .voxel_point_quantile(
+          entry, sp_spatial, obs$lon[i], obs$lat[i],
+          month, daypart_by_var[[v]], v, stochastic
+        )
+      }, numeric(1)), vars)
     }
-    vapply(vars, function(v) .niche_var_mean(cl, v), numeric(1))
-  }))
+  }
+  do.call(rbind, rows)
+}
+
+# Background adapter: the "available but not necessarily occupied" reference
+# every species' presence values are scored against -- every (footprint
+# pixel x height tier) combination, or (if `footprint` is NULL, i.e. pooled
+# mode) one row per height tier. Synthesizes a pixel-center-lon/lat
+# "observation" per combination via .pixel_to_lonlat() and delegates to
+# voxel_climate_table() -- one function serves init_colonization()'s site
+# background, characterize_niches.R's per-site background, and (called with
+# footprint = NULL, months = "annual") the diagnostic scripts'
+# per-height-tier climate table (replacing height_clim_scalars()).
+voxel_background_table <- function(clim_cache_voxel, microenv, footprint, vars = NICHE_VARS,
+                                   months = 1:12, stochastic = FALSE) {
+  heights <- clim_cache_voxel$heights
+  sp_spatial <- if (.spatial_extent_usable(microenv)) microenv$.spatial else NULL
+
+  if (is.null(footprint) || is.null(sp_spatial) || nrow(footprint) == 0) {
+    obs <- data.frame(lon = NA_real_, lat = NA_real_, height = heights)
+  } else {
+    centers <- .pixel_to_lonlat(footprint$row, footprint$col, sp_spatial)
+    obs <- data.frame(
+      lon = rep(centers$lon, times = length(heights)),
+      lat = rep(centers$lat, times = length(heights)),
+      height = rep(heights, each = nrow(footprint))
+    )
+  }
+  voxel_climate_table(clim_cache_voxel, microenv, obs, vars, months, stochastic)
 }
 
 # This-site-only fallback for a species missing from the pooled cross-site
-# cache (see init_colonization()) — same density-ratio model, but scored
-# against this one site's own background instead of the pooled one.
-get_niche <- function(site_obs, heights, clim_by_height, bg_density, vars = NICHE_VARS) {
-  clim_scalars <- height_clim_scalars(clim_by_height, vars)
-  obs_clim <- function(h) clim_scalars[which.min(abs(heights - h)), , drop = TRUE]
-
+# cache (see init_colonization()) — same density-ratio model as
+# get_niche_voxel()'s caller, but scored against this one site's own
+# background instead of the pooled one. Replaces the old flattened
+# get_niche() (removed; see git history), which used height_clim_scalars().
+get_niche_voxel <- function(site_obs, clim_cache_voxel, microenv, bg_density, vars = NICHE_VARS) {
   species_ids <- sort(unique(site_obs$FinalID))
   niches <- lapply(species_ids, function(sp) {
     obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
     if (nrow(obs_sp) == 0) {
       return(NULL)
     }
-    clim_vals <- do.call(rbind, lapply(obs_sp$Height_m, obs_clim))
+    obs <- data.frame(lon = obs_sp$lon, lat = obs_sp$lat, height = obs_sp$Height_m)
+    clim_vals <- voxel_climate_table(clim_cache_voxel, microenv, obs, vars)
     niche_density_model(clim_vals, bg_density, vars)
   })
   names(niches) <- species_ids
@@ -929,9 +969,10 @@ niche_raw_score <- function(clim_values, niche) {
 #     which species used which mode.
 #
 # obs_clim_vals / landscape_clim_vals: matrices of climate rows (rows =
-# observations or height tiers, one column per NICHE_VARS), as produced by
-# height_clim_scalars() + obs_clim() lookups. Falls back to 100 (no rescale)
-# if neither has anything to compute a ceiling from.
+# observations or footprint-pixel-x-height combinations, one column per
+# NICHE_VARS), as produced by voxel_climate_table()/voxel_background_table().
+# Falls back to 100 (no rescale) if neither has anything to compute a
+# ceiling from.
 niche_ceiling <- function(niche, obs_clim_vals, landscape_clim_vals = NULL) {
   candidates <- if (!is.null(obs_clim_vals) && nrow(obs_clim_vals) > 0) {
     obs_clim_vals
@@ -1045,7 +1086,67 @@ niche_match_array <- function(clim_values, niche) {
 #   branch_density       m² branch surface per m² projected crown area (literature: 2–5)
 #   epiphyte_footprint_m2  bark area per individual Maxillariinae (~0.02 m²)
 #
-# Crown shape: bell curve peaking at 75% of tree height (widest) tapering to
+# Crown shape: bell curve peaking at 65% of tree height (widest) tapering to
+# point at top — approximates tropical montane cloud forest crown architecture.
+# Johansson zones 1–2 = trunk only; zones 3–5 = expanding horizontal crown.
+# Johansson zone classifier: zones 1-2 are trunk-only (single column cell);
+# 3-5 are the expanding, bell-shaped crown. Matches methods.tex's zone
+# classification piecewise function (JZ(rel_h)).
+.classify_tree_zone <- function(rel_height) {
+  if (rel_height < 0.10) {
+    1L
+  } else if (rel_height < 0.30) {
+    2L
+  } else if (rel_height < 0.50) {
+    3L
+  } else if (rel_height < 0.80) {
+    4L
+  } else {
+    5L
+  }
+}
+
+# Crown taper fraction: 0 at the crown's base (zone 3, rel_height = 0.30),
+# 1 at its top (rel_height = 1.0). Feeds .effective_crown_radius() below.
+# Domain must start at zone 3's actual lower boundary (0.30), not 0.5 --
+# starting at 0.5 previously made this negative (and effective_crown_radius
+# therefore negative, i.e. never satisfied by any horiz_dist >= 0) for the
+# entire 0.30-0.50 sub-range, silently excluding that whole band from valid
+# canopy habitat on every tree.
+.crown_fraction <- function(rel_height) {
+  (rel_height - 0.30) / 0.70
+}
+
+# Effective crown radius at this relative height: a bell curve peaking at
+# 65% of tree height (widest) and tapering to a point at the top --
+# approximates tropical montane cloud forest crown architecture.
+# `crown_r` may be passed in either grid-cell units (habitat test) or meters
+# (bark-area calc); the caller is responsible for using matching units for
+# `crown_r` and whatever it compares the result against. Matches
+# methods.tex Eq.~\ref{eq:reff}: r_eff = r_crown * sin(tau_c * pi).
+.effective_crown_radius <- function(crown_r, rel_height) {
+  crown_r * sin(.crown_fraction(rel_height) * pi)
+}
+
+# Predicate: is this voxel inside the tree's canopy? Trunk zones (1-2) only
+# occupy the single column cell directly at the trunk; crown zones (3-5)
+# occupy every cell within the bell-shaped effective crown radius.
+.voxel_in_tree <- function(zone_id, horiz_dist, effective_r) {
+  if (zone_id <= 2) horiz_dist == 0 else horiz_dist <= effective_r
+}
+
+# Populate the landscape array with randomly placed trees and derive per-voxel
+# carrying capacity from bark surface area (Myster 2017, Johansson 1974).
+#
+# forestparams must contain:
+#   stems_per_ha         tree density for trees ≥10 cm dsh (Myster 2017: ~298/ha)
+#   mean_hgt / sd_hgt    tree height distribution (m)
+#   mean_crown_r / sd_crown_r  crown radius distribution (m)
+#   trunk_r              mean trunk radius in m (Myster 2017: mean dsh 22.7 cm → 0.114 m)
+#   branch_density       m² branch surface per m² projected crown area (literature: 2–5)
+#   epiphyte_footprint_m2  bark area per individual Maxillariinae (~0.02 m²)
+#
+# Crown shape: bell curve peaking at 65% of tree height (widest) tapering to
 # point at top — approximates tropical montane cloud forest crown architecture.
 # Johansson zones 1–2 = trunk only; zones 3–5 = expanding horizontal crown.
 build_forest <- function(landscape, heights, forestparams, site_obs, resolution) {
@@ -1076,62 +1177,38 @@ build_forest <- function(landscape, heights, forestparams, site_obs, resolution)
   carCap_voxel <- array(1L, dim = c(xDim, yDim, zDim))
 
   for (ti in seq_len(nTree)) {
-    tx <- trees$x[ti]
-    ty <- trees$y[ti]
-    th <- trees$height[ti]
-    cr <- trees$crown_r_cells[ti]
+    tree_x <- trees$x[ti]
+    tree_y <- trees$y[ti]
+    tree_height <- trees$height[ti]
+    crown_r_cells <- trees$crown_r_cells[ti]
 
-    x_range <- max(1, tx - ceiling(cr)):min(xDim, tx + ceiling(cr))
-    y_range <- max(1, ty - ceiling(cr)):min(yDim, ty + ceiling(cr))
+    x_range <- max(1, tree_x - ceiling(crown_r_cells)):min(xDim, tree_x + ceiling(crown_r_cells))
+    y_range <- max(1, tree_y - ceiling(crown_r_cells)):min(yDim, tree_y + ceiling(crown_r_cells))
 
     for (x in x_range) {
       for (y in y_range) {
-        horiz_dist <- sqrt((x - tx)^2 + (y - ty)^2)
+        horiz_dist <- sqrt((x - tree_x)^2 + (y - tree_y)^2)
 
         for (z in seq_len(zDim)) {
           h <- heights[z]
-          if (h > th || h < 0.5) next
+          if (h > tree_height || h < 0.5) next
 
-          rel_h <- h / th
+          rel_height <- h / tree_height
+          zone_id <- .classify_tree_zone(rel_height)
 
-          jzone <- if (rel_h < 0.10) {
-            1L
-          } else if (rel_h < 0.30) {
-            2L
-          } else if (rel_h < 0.50) {
-            3L
-          } else if (rel_h < 0.80) {
-            4L
-          } else {
-            5L
-          }
-
-          # Trunk zones: only the single column cell; crown zones (3-5, starting
-          # at rel_h=0.30): bell-shaped radius. Domain must start at zone 3's
-          # actual lower boundary (0.30), not 0.5 — using 0.5 here previously
-          # made crown_fraction negative (and effective_r therefore negative,
-          # i.e. never satisfied by any horiz_dist >= 0) for the entire
-          # 0.30-0.50 sub-range, silently excluding that whole band from valid
-          # canopy habitat on every tree.
-          in_tree <- if (jzone <= 2) {
-            horiz_dist == 0
-          } else {
-            crown_fraction <- (rel_h - 0.30) / 0.70 # 0 at zone 3 base, 1 at top
-            effective_r <- cr * sin(crown_fraction * pi) # peaks at 65% height
-            horiz_dist <= effective_r
-          }
-          if (!in_tree) next
+          effective_r <- .effective_crown_radius(crown_r_cells, rel_height)
+          voxel_in_tree <- .voxel_in_tree(zone_id, horiz_dist, effective_r)
+          if (!voxel_in_tree) next
 
           landscape[x, y, z] <- TRUE
-          if (jzone > zone[x, y, z]) zone[x, y, z] <- jzone
+          if (zone_id > zone[x, y, z]) zone[x, y, z] <- zone_id
 
           # Bark surface area (m²) per voxel → carrying capacity
           vox_h_m <- vox_heights[z]
-          bark_area <- if (jzone <= 2) {
+          bark_area <- if (zone_id <= 2) {
             2 * pi * forestparams$trunk_r * vox_h_m
           } else {
-            crown_fraction <- (rel_h - 0.30) / 0.70
-            eff_r_m <- cr * resolution * sin(crown_fraction * pi) # grid cells → m
+            eff_r_m <- .effective_crown_radius(crown_r_cells * resolution, rel_height) # grid cells → m
             pi * eff_r_m^2 * forestparams$branch_density * vox_h_m
           }
           cap <- max(1L, as.integer(floor(bark_area / forestparams$epiphyte_footprint_m2)))
@@ -1174,7 +1251,7 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   # other sites, do in a landscape it's never been recorded in?" (a species
   # in the subset still needs *some* niche to score against -- either from
   # species_niches.rds, characterize_niches.R's cross-site cache, or from
-  # this site's own get_niche() fallback below -- a species with neither is
+  # this site's own get_niche_voxel() fallback below -- a species with neither is
   # simply unrestricted, same as any species with no usable observations).
   # site_obs itself is NOT filtered by the subset -- it still drives the
   # landscape's physical spatial extent (lat/lon range above) and stays
@@ -1274,8 +1351,10 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   if (is.null(clim_cache_voxel)) {
     log_msg("Pre-computing per-voxel stochastic climate cache...")
     clim_cache_voxel <- build_clim_cache_voxel(microenv, footprint = footprint)
-    log_msg(sprintf("Per-voxel climate cache ready (mode: %s).",
-      if (is.null(footprint)) "pooled" else "pixel"))
+    log_msg(sprintf(
+      "Per-voxel climate cache ready (mode: %s).",
+      if (is.null(footprint)) "pooled" else "pixel"
+    ))
   }
 
   valid_clim <- which(!sapply(clim_by_height, is.null))
@@ -1303,15 +1382,15 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   # observation of a species across all 5 sites, not just this one) if it
   # exists and covers every species observed at this site — a species with
   # only 2-3 records at one site may have several more elsewhere. Falls back
-  # to this-site-only get_niche() for any species the cache doesn't cover
-  # (e.g. added to the field data since the cache was last regenerated), or
-  # entirely if the cache doesn't exist at all — scored against this site's
-  # own background distribution in that case.
+  # to this-site-only get_niche_voxel() for any species the cache doesn't
+  # cover (e.g. added to the field data since the cache was last
+  # regenerated), or entirely if the cache doesn't exist at all — scored
+  # against this site's own background distribution in that case.
   # species_ids already computed above (and filtered by params$species_subset
   # if set) -- reused here rather than re-deriving from site_obs, so a
   # restricted subset also skips the niche-scoring work below for every
   # species that isn't in it.
-  niche_cache_path <- file.path(PROCESSED_DIR, "species_niches.rds")
+  niche_cache_path <- NICHE_CACHE_PATH
   niches_by_species <- setNames(vector("list", length(species_ids)), species_ids)
 
   cached_geom <- if (file.exists(niche_cache_path)) readRDS(niche_cache_path) else NULL
@@ -1324,23 +1403,16 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
     }
   }
   if (length(missing_from_cache) > 0) {
-    # Background: every height tier's monthly climate at this site (day-
-    # filtered swdown, via .niche_var_mean) — same granularity as the
-    # cross-site background characterize_niches.R builds, just for one site.
-    site_bg_rows <- do.call(rbind, lapply(clim_month_by_height, function(by_month) {
-      do.call(rbind, lapply(by_month, function(cm) {
-        if (is.null(cm) || nrow(cm) == 0) {
-          return(NULL)
-        }
-        as.data.frame(as.list(setNames(
-          vapply(NICHE_VARS, function(v) .niche_var_mean(cm, v), numeric(1)), NICHE_VARS
-        )))
-      }))
-    }))
-    site_bg <- build_background_density(site_bg_rows)
-    fallback <- get_niche(
+    # Background: every (footprint pixel x height tier x month) combination
+    # actually present in this landscape (see voxel_background_table()) —
+    # same per-voxel granularity the cross-site background
+    # characterize_niches.R builds, just scoped to one site's landscape.
+    site_bg <- build_background_density(
+      voxel_background_table(clim_cache_voxel, microenv, footprint)
+    )
+    fallback <- get_niche_voxel(
       site_obs[site_obs$FinalID %in% missing_from_cache, ],
-      heights, clim_by_height, site_bg
+      clim_cache_voxel, microenv, site_bg
     )
     niches_by_species[missing_from_cache] <- fallback[missing_from_cache]
   }
@@ -1362,14 +1434,20 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   # instead, so it still gets a meaningful 0-100 answer to "how well does
   # this landscape's best available height match my niche?" rather than no
   # rescale at all.
-  height_scalars <- height_clim_scalars(clim_by_height)
-  landscape_clim_vals <- height_scalars[stats::complete.cases(height_scalars), , drop = FALSE]
-  obs_clim_at <- function(h) height_scalars[which.min(abs(heights - h)), , drop = TRUE]
+  landscape_clim_vals <- voxel_background_table(clim_cache_voxel, microenv, footprint, months = "annual")
+  landscape_clim_vals <- landscape_clim_vals[stats::complete.cases(landscape_clim_vals), , drop = FALSE]
   n_landscape_ceiling <- 0L
   for (sp in species_ids) {
     if (is.null(niches_by_species[[sp]])) next
     obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
-    obs_clim_vals <- if (nrow(obs_sp) > 0) do.call(rbind, lapply(obs_sp$Height_m, obs_clim_at)) else NULL
+    obs_clim_vals <- if (nrow(obs_sp) > 0) {
+      voxel_climate_table(clim_cache_voxel, microenv,
+        data.frame(lon = obs_sp$lon, lat = obs_sp$lat, height = obs_sp$Height_m),
+        months = "annual"
+      )
+    } else {
+      NULL
+    }
     if (is.null(obs_clim_vals)) n_landscape_ceiling <- n_landscape_ceiling + 1L
     niches_by_species[[sp]]$ceiling <- niche_ceiling(niches_by_species[[sp]], obs_clim_vals, landscape_clim_vals)
   }
@@ -1456,7 +1534,7 @@ run_pass1_disperse <- function(state, abundanceA, size_A, t, stochastic = FALSE)
       if (is.na(N) || N == 0) next
       psb_s <- size_A[x, y, z, t, sp] # tracked pseudobulb size (cm)
       seeds <- reproduce(N,
-        s = psb_s,
+        size = psb_s,
         p_poll = p$p_poll, p_germ = p$p_germ, p_s1 = p$p_s1
       )
       total_seeds <- total_seeds + seeds
@@ -1476,6 +1554,14 @@ run_pass1_disperse <- function(state, abundanceA, size_A, t, stochastic = FALSE)
   }
   message("Pass1: seeds produced=", total_seeds, " dispersed=", sum(Disp))
   list(Disp = Disp, fruited = fruited)
+}
+
+# Predicate: is this voxel eligible for establishment this height/species —
+# valid canopy landscape, under carrying capacity, and seeds actually landed
+# here? All three array args must share the same [xDim, yDim] shape (one
+# height-tier slice).
+.voxel_can_establish <- function(landscape_zi, total_occ_zi, carCap_voxel_zi, seeds_slice) {
+  landscape_zi & total_occ_zi < carCap_voxel_zi & seeds_slice > 0L
 }
 
 # Pass 2: Dispersed seeds try to establish in new cells.
@@ -1548,20 +1634,20 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
       )
 
       # Mask: valid landscape, not at capacity, has seeds
-      can_est <- state$landscape[, , zi] &
-        total_occ[, , zi] < state$carCap_voxel[, , zi] &
-        seeds_slice > 0L
+      can_establish <- .voxel_can_establish(
+        state$landscape[, , zi], total_occ[, , zi], state$carCap_voxel[, , zi], seeds_slice
+      )
 
-      if (!any(can_est)) next
+      if (!any(can_establish)) next
 
-      total_seeds_seen <- total_seeds_seen + sum(seeds_slice[can_est])
-      n <- sum(can_est)
-      established <- rbinom(n, as.integer(seeds_slice[can_est]), p_est[can_est])
+      total_seeds_seen <- total_seeds_seen + sum(seeds_slice[can_establish])
+      n <- sum(can_establish)
+      established <- rbinom(n, as.integer(seeds_slice[can_establish]), p_est[can_establish])
       # Clamp to remaining capacity
-      space <- pmax(0L, state$carCap_voxel[, , zi][can_est] - total_occ[, , zi][can_est])
+      space <- pmax(0L, state$carCap_voxel[, , zi][can_establish] - total_occ[, , zi][can_establish])
       established <- pmin(as.integer(established), space)
-      abundanceS[, , zi, tnext, sp][can_est] <-
-        abundanceS[, , zi, tnext, sp][can_est] + established
+      abundanceS[, , zi, tnext, sp][can_establish] <-
+        abundanceS[, , zi, tnext, sp][can_establish] + established
       # Newly established seedlings start at s_S_min (a freshly germinated
       # dust seed). Slot tnext is guaranteed untouched before this call --
       # nothing else writes to next year's slot earlier in the timestep --
@@ -1569,9 +1655,9 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
       # runcolonization()/run_spinup() blends this year's surviving
       # seedlings into slot tnext afterward (see methods.tex, Population
       # state and stage structure).
-      newly_est <- can_est
-      newly_est[can_est] <- established > 0L
-      size_S[, , zi, tnext, sp][newly_est] <- p$s_S_min
+      newly_established <- can_establish
+      newly_established[can_establish] <- established > 0L
+      size_S[, , zi, tnext, sp][newly_established] <- p$s_S_min
       total_established <- total_established + sum(established)
     }
   }
@@ -1582,18 +1668,9 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
 # Pass 3: Survival and stage transitions, vectorized per height tier.
 #
 # Survival is genuinely per-voxel for all three stages: size_S/size_J/size_A
-# each track a persistent, per-voxel mean pseudobulb size (not just size_A
-# as before), so survival_logit() is evaluated once per voxel using that
-# voxel's own tracked size. S/J previously used a single scalar drawn fresh
-# from the stage's size range every month and thrown away immediately
-# (never remembered, never incremented); A previously used the SPATIAL MEAN
-# size across the whole height tier rather than each voxel's own value.
-# Both were replaced so that (a) a voxel's seedlings/juveniles have a real,
-# growing size rather than a random stand-in, and (b) an individual
-# promoted S->J or J->A carries its actual accumulated size forward instead
-# of resetting to the new stage's floor (see methods.tex, Population state
-# and stage structure, and Stage transitions). rbinom() still handles the
-# whole [xDim x yDim] slice in one call per stage — passing a same-shape
+# each track a persistent, per-voxel mean pseudobulb size, so survival_logit()
+# is evaluated once per voxel using that voxel's own tracked size.
+# rbinom() handles the whole [xDim x yDim] slice in one call per stage — passing a same-shape
 # array of probabilities instead of a scalar is natively vectorized, so
 # this doesn't reintroduce a per-voxel loop.
 run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
@@ -1602,39 +1679,41 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
   xDim <- state$xDim
   yDim <- state$yDim
 
-  # Helper: apply rbinom to a 2D slice with a scalar probability. Still used
+  # Predicate: is this scalar transition/survival probability undefined (NA/
+  # NaN, e.g. from transition_logit() on an all-NA precip_annual), non-
+  # positive, or is there nobody in this stage slice to apply it to anyway?
+  # Any of the three means "no transition/death this month" rather than
+  # propagating a NaN into rbinom() or crashing on `if (NA)`.
+  .transition_undefined_or_empty <- function(prob, stage_slice) {
+    is.na(prob) || prob <= 0 || sum(stage_slice) == 0L
+  }
+
+  # Helper: apply rbinom to a 2D slice with a scalar probability. Used
   # for stage transitions, which remain climate-driven rather than
-  # size-driven (see methods.tex, Stage transitions) — unchanged from before.
-  .surv_slice <- function(sl, prob) {
-    # prob can come out NaN (transition_logit() on a
-    # precip_annual that's itself NaN, when a height tier's clim_year$precip
-    # has no valid values) -- "prob <= 0" on NaN is NA, not FALSE, which
-    # crashed if() with "missing value where TRUE/FALSE needed"
-    # (MindoMirador/Yanayacu, 2026-07-27 and reportedly since 2026-07-16).
-    # Treat an undefined probability as no transition this month, same as
-    # prob <= 0, rather than propagating the NaN into rbinom() or crashing.
-    if (is.na(prob) || prob <= 0 || sum(sl) == 0L) {
-      return(sl * 0L)
+  # size-driven (see methods.tex, Stage transitions).
+  .surv_slice <- function(stage_slice, prob) {
+    if (.transition_undefined_or_empty(prob, stage_slice)) {
+      return(stage_slice * 0L)
     }
     if (prob >= 1) {
-      return(sl)
+      return(stage_slice)
     }
-    array(rbinom(length(sl), as.integer(sl), prob), dim = dim(sl))
+    array(rbinom(length(stage_slice), as.integer(stage_slice), prob), dim = dim(stage_slice))
   }
   # Same idea, but for a per-voxel probability array rather than one shared
   # scalar — used for survival now that it depends on each voxel's own
   # tracked size. Cells outside the landscape are 0 already — no masking
   # needed (rbinom with size=0 is always 0 regardless of prob).
-  .surv_slice_vec <- function(sl, prob_arr) {
-    if (sum(sl) == 0L) {
-      return(sl * 0L)
+  .surv_slice_vec <- function(stage_slice, prob_arr) {
+    if (sum(stage_slice) == 0L) {
+      return(stage_slice * 0L)
     }
     prob_arr <- pmin(pmax(prob_arr, 0), 1)
     # An undefined per-voxel probability (e.g. a pixel/month/daypart with no
     # climate observations) is treated as no transition/no death this month,
     # same convention .surv_slice() already uses for a scalar NaN prob.
     prob_arr[!is.finite(prob_arr)] <- 0
-    array(rbinom(length(sl), as.integer(sl), prob_arr), dim = dim(sl))
+    array(rbinom(length(stage_slice), as.integer(stage_slice), prob_arr), dim = dim(stage_slice))
   }
 
   for (sp in seq_len(state$n_species)) {
@@ -1673,19 +1752,19 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
       if (is.null(clim_year)) next
       precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
 
-      slS <- abundanceS[, , zi, t, sp]
-      slJ <- abundanceJ[, , zi, t, sp]
-      slA <- abundanceA[, , zi, t, sp]
-      sS_slice <- size_S[, , zi, t, sp]
-      sJ_slice <- size_J[, , zi, t, sp]
-      sa_slice <- size_A[, , zi, t, sp]
+      abundance_S_slice <- abundanceS[, , zi, t, sp]
+      abundance_J_slice <- abundanceJ[, , zi, t, sp]
+      abundance_A_slice <- abundanceA[, , zi, t, sp]
+      size_S_slice <- size_S[, , zi, t, sp]
+      size_J_slice <- size_J[, , zi, t, sp]
+      size_A_slice <- size_A[, , zi, t, sp]
       delta_s_total_S <- array(0, dim = c(xDim, yDim))
       delta_s_total_J <- array(0, dim = c(xDim, yDim))
       delta_s_total_A <- array(0, dim = c(xDim, yDim))
 
       for (month in 1:12) {
-        cm <- state$clim_month_by_height[[zi]][[month]]
-        if (is.null(cm) || nrow(cm) == 0) next
+        clim_month_table <- state$clim_month_by_height[[zi]][[month]]
+        if (is.null(clim_month_table) || nrow(clim_month_table) == 0) next
 
         # Per-voxel daytime quantile draws (see .clim_voxel_slice()), falling
         # back to this month's flat clim-table mean wherever the voxel cache
@@ -1693,15 +1772,15 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         # finite instead of propagating NA into rbinom().
         temp_mat <- .fill_na(
           .clim_voxel_slice(state, zi, month, "day", "temp", stochastic),
-          mean(cm$temp, na.rm = TRUE), xDim, yDim
+          mean(clim_month_table$temp, na.rm = TRUE), xDim, yDim
         )
         relhum_mat <- .fill_na(
           .clim_voxel_slice(state, zi, month, "day", "relhum", stochastic),
-          mean(cm$relhum, na.rm = TRUE), xDim, yDim
+          mean(clim_month_table$relhum, na.rm = TRUE), xDim, yDim
         )
         swdown_mat <- .fill_na(
           .clim_voxel_slice(state, zi, month, "day", "swdown", stochastic),
-          mean(cm$swdown[cm$swdown > 0], na.rm = TRUE), xDim, yDim
+          mean(clim_month_table$swdown[clim_month_table$swdown > 0], na.rm = TRUE), xDim, yDim
         )
         swdown_rel <- if (p$mean_swdown_site > 0) swdown_mat / p$mean_swdown_site else matrix(1.0, xDim, yDim)
         swdown_rel[!is.finite(swdown_rel)] <- 1.0
@@ -1709,13 +1788,35 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         # ── s(z,e): monthly survival, per voxel using each voxel's own
         # tracked size AND now its own tracked climate draw (see function
         # header note above) ─────────────────────────────────────────────
-        s_S_arr <- survival_logit("S", sS_slice, temp_mat, relhum_mat, swdown_rel, p$beta0_S, p$beta0_J, p$beta0_A, p$beta1)
-        s_J_arr <- survival_logit("J", sJ_slice, temp_mat, relhum_mat, swdown_rel, p$beta0_S, p$beta0_J, p$beta0_A, p$beta1)
-        s_A_arr <- survival_logit("A", sa_slice, temp_mat, relhum_mat, swdown_rel, p$beta0_S, p$beta0_J, p$beta0_A, p$beta1)
+        # 2026-08-23: fixed a real bug found via the founder_number sweep's
+        # first-ever colonization run against 0.4m/subsampled microenv data
+        # (job 27106698 -- "NAs are not allowed in subscripted assignments"
+        # in run_pass3_survive_grow(), traced via debug_founder_crash2.R).
+        # Root cause: every params list in this codebase (make_params.R,
+        # run_colonization.R's literature defaults) names these fields
+        # `beta0S`/`beta0J`/`beta0A` (no underscore), but this call site
+        # read `p$beta0_S`/`p$beta0_J`/`p$beta0_A` (WITH underscore) --
+        # always NULL, since R's `$` on a missing list name returns NULL
+        # rather than erroring. `NULL + <finite matrix>` in R evaluates to
+        # `numeric(0)` (not NA), which survival_logit()'s eta/logistic
+        # transform then carries straight through -- silently collapsing
+        # survive_prob_S/J/A to a zero-length vector instead of erroring or
+        # producing NA, for EVERY stage, in every colonization run. That
+        # only became visible now because this is the first run where a
+        # non-empty abundance slice reached rbinom() early enough (gen 1,
+        # month 1) to hit .surv_slice_vec()'s vectorized recycling of a
+        # zero-length `prob` against a nonzero-length `size` -- which
+        # itself silently returns all-NA (with an "NAs produced" warning)
+        # rather than erroring, several function calls downstream of the
+        # actual corruption. Confirmed via range(numeric(0)) == c(Inf,
+        # -Inf), matching survive_prob_A's diagnosed range exactly.
+        survive_prob_S <- survival_logit("S", size_S_slice, temp_mat, relhum_mat, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
+        survive_prob_J <- survival_logit("J", size_J_slice, temp_mat, relhum_mat, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
+        survive_prob_A <- survival_logit("A", size_A_slice, temp_mat, relhum_mat, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
 
-        slS <- .surv_slice_vec(slS, s_S_arr)
-        slJ <- .surv_slice_vec(slJ, s_J_arr)
-        slA <- .surv_slice_vec(slA, s_A_arr)
+        abundance_S_slice <- .surv_slice_vec(abundance_S_slice, survive_prob_S)
+        abundance_J_slice <- .surv_slice_vec(abundance_J_slice, survive_prob_J)
+        abundance_A_slice <- .surv_slice_vec(abundance_A_slice, survive_prob_A)
 
         # ── g(s'|s,e): monthly stage transitions (still climate-driven, not
         # size-driven — unchanged from before, now per-voxel via relhum_mat) ─
@@ -1725,8 +1826,8 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         p_StoJ <- pmin(1, pmax(0, p_StoJ + epsilon))
         p_JtoA <- pmin(1, pmax(0, p_JtoA + epsilon))
 
-        n_StoJ <- .surv_slice_vec(slS, p_StoJ)
-        n_JtoA <- .surv_slice_vec(slJ, p_JtoA)
+        n_StoJ <- .surv_slice_vec(abundance_S_slice, p_StoJ)
+        n_JtoA <- .surv_slice_vec(abundance_J_slice, p_JtoA)
 
         # Size carry-over: promoted individuals bring their CURRENT tracked
         # size with them instead of resetting to the destination stage's
@@ -1734,24 +1835,24 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         # stage this voxel. J->A promotions are floored at s_A_min (the
         # adult stage's defined lower bound) in case a transition fires
         # while the juvenile's tracked size is still below it. Order
-        # matters: A's blend must use sJ_slice's value BEFORE J's blend
+        # matters: A's blend must use size_J_slice's value BEFORE J's blend
         # below overwrites it. Explicit mask + index (rather than ifelse())
         # to match this file's existing style and avoid any doubt about
         # dim-attribute preservation on a matrix.
-        sa_denom <- slA + n_JtoA
-        sa_mask <- sa_denom > 0L
-        sa_blend <- (slA * sa_slice + n_JtoA * pmax(p$s_A_min, sJ_slice)) / pmax(sa_denom, 1)
-        sa_slice[sa_mask] <- sa_blend[sa_mask]
+        a_denom <- abundance_A_slice + n_JtoA
+        a_mask <- a_denom > 0L
+        a_blend <- (abundance_A_slice * size_A_slice + n_JtoA * pmax(p$s_A_min, size_J_slice)) / pmax(a_denom, 1)
+        size_A_slice[a_mask] <- a_blend[a_mask]
 
-        J_stayers <- slJ - n_JtoA
-        sJ_denom <- J_stayers + n_StoJ
-        sJ_mask <- sJ_denom > 0L
-        sJ_blend <- (J_stayers * sJ_slice + n_StoJ * sS_slice) / pmax(sJ_denom, 1)
-        sJ_slice[sJ_mask] <- sJ_blend[sJ_mask]
+        J_stayers <- abundance_J_slice - n_JtoA
+        j_denom <- J_stayers + n_StoJ
+        j_mask <- j_denom > 0L
+        j_blend <- (J_stayers * size_J_slice + n_StoJ * size_S_slice) / pmax(j_denom, 1)
+        size_J_slice[j_mask] <- j_blend[j_mask]
 
-        slS <- slS - n_StoJ
-        slJ <- slJ + n_StoJ - n_JtoA
-        slA <- slA + n_JtoA
+        abundance_S_slice <- abundance_S_slice - n_StoJ
+        abundance_J_slice <- abundance_J_slice + n_StoJ - n_JtoA
+        abundance_A_slice <- abundance_A_slice + n_JtoA
 
         # ── Growth increment: this month's share, own noise draw per stage.
         # Deferred and applied once at year end (below), exactly like
@@ -1764,32 +1865,32 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         # calibrated for ADULTS specifically, Zotz 1998) — a disclosed
         # simplification in the absence of stage-specific growth-rate
         # literature values for seedlings/juveniles; see methods.tex.
-        ds_base <- (p$delta_s_base / 12) * (precip_annual / 2500) * (relhum_mat / 85)
+        delta_size_base <- (p$delta_s_base / 12) * (precip_annual / 2500) * (relhum_mat / 85)
         noise_sd <- p$sigma * 0.5 / sqrt(12)
-        ds_S <- ds_base + rnorm(xDim * yDim, 0, noise_sd)
-        dim(ds_S) <- c(xDim, yDim)
-        ds_J <- ds_base + rnorm(xDim * yDim, 0, noise_sd)
-        dim(ds_J) <- c(xDim, yDim)
-        ds_A <- ds_base + rnorm(xDim * yDim, 0, noise_sd)
-        dim(ds_A) <- c(xDim, yDim)
-        delta_s_total_S <- delta_s_total_S + ds_S
-        delta_s_total_J <- delta_s_total_J + ds_J
-        delta_s_total_A <- delta_s_total_A + ds_A
+        delta_size_S <- delta_size_base + rnorm(xDim * yDim, 0, noise_sd)
+        dim(delta_size_S) <- c(xDim, yDim)
+        delta_size_J <- delta_size_base + rnorm(xDim * yDim, 0, noise_sd)
+        dim(delta_size_J) <- c(xDim, yDim)
+        delta_size_A <- delta_size_base + rnorm(xDim * yDim, 0, noise_sd)
+        dim(delta_size_A) <- c(xDim, yDim)
+        delta_s_total_S <- delta_s_total_S + delta_size_S
+        delta_s_total_J <- delta_s_total_J + delta_size_J
+        delta_s_total_A <- delta_s_total_A + delta_size_A
       }
 
-      abundanceS[, , zi, t, sp] <- slS
-      abundanceJ[, , zi, t, sp] <- slJ
-      abundanceA[, , zi, t, sp] <- slA
+      abundanceS[, , zi, t, sp] <- abundance_S_slice
+      abundanceJ[, , zi, t, sp] <- abundance_J_slice
+      abundanceA[, , zi, t, sp] <- abundance_A_slice
 
       # Cost of reproduction: reduce the year's total growth where the cell
       # fruited (adults only — S/J don't reproduce, so this doesn't apply
       # to their growth totals).
-      fr_slice <- fruited[, , zi, sp]
-      delta_s_total_A[fr_slice] <- delta_s_total_A[fr_slice] * p$cost_repro
+      fruited_slice <- fruited[, , zi, sp]
+      delta_s_total_A[fruited_slice] <- delta_s_total_A[fruited_slice] * p$cost_repro
 
-      sS_new <- pmin(p$s_S_max, pmax(p$s_S_min, sS_slice + delta_s_total_S))
-      sJ_new <- pmin(p$s_J_max, pmax(p$s_J_min, sJ_slice + delta_s_total_J))
-      sA_new <- pmin(p$s_A_max, pmax(p$s_A_min, sa_slice + delta_s_total_A))
+      size_S_new <- pmin(p$s_S_max, pmax(p$s_S_min, size_S_slice + delta_s_total_S))
+      size_J_new <- pmin(p$s_J_max, pmax(p$s_J_min, size_J_slice + delta_s_total_J))
+      size_A_new <- pmin(p$s_A_max, pmax(p$s_A_min, size_A_slice + delta_s_total_A))
       # NOTE: an individual promoted mid-year still accrues this whole
       # year's growth total on top of its carried-over starting size,
       # rather than only its fraction of the year since promotion — a
@@ -1802,314 +1903,18 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
       has_S <- abundanceS[, , zi, t, sp] > 0L
       has_J <- abundanceJ[, , zi, t, sp] > 0L
       has_A <- abundanceA[, , zi, t, sp] > 0L
-      sS_slice[has_S] <- sS_new[has_S]
-      sJ_slice[has_J] <- sJ_new[has_J]
-      sa_slice[has_A] <- sA_new[has_A]
-      size_S[, , zi, t, sp] <- sS_slice
-      size_J[, , zi, t, sp] <- sJ_slice
-      size_A[, , zi, t, sp] <- sa_slice
+      size_S_slice[has_S] <- size_S_new[has_S]
+      size_J_slice[has_J] <- size_J_new[has_J]
+      size_A_slice[has_A] <- size_A_new[has_A]
+      size_S[, , zi, t, sp] <- size_S_slice
+      size_J[, , zi, t, sp] <- size_J_slice
+      size_A[, , zi, t, sp] <- size_A_slice
     }
   }
   list(
     S = abundanceS, J = abundanceJ, A = abundanceA,
     size_S = size_S, size_J = size_J, size_A = size_A
   )
-}
-
-# ── Internal live visualisation ───────────────────────────────────────────────
-
-.plot_live <- function(state, abundanceS, abundanceJ, abundanceA,
-                       totalS, totalJ, totalA, t, carCap, sleeptime = 0.2) {
-  stage_cols <- scico::scico(3, palette = "lipari", begin = 0.2, end = 0.8)
-  sp_cols <- if (state$n_species == 1) {
-    scico::scico(3, palette = "lipari", begin = 0.3, end = 0.7)[2]
-  } else {
-    scico::scico(state$n_species, palette = "lipari", begin = 0.2, end = 0.8)
-  }
-  total <- totalS + totalJ + totalA
-  n_sp <- state$n_species
-  par(mfrow = c(1, n_sp + 1), mar = c(4, 4, 3, 2))
-  for (sp in 1:n_sp) {
-    ts_S <- sapply(1:t, function(i) sum(abundanceS[, , , i, sp]))
-    ts_J <- sapply(1:t, function(i) sum(abundanceJ[, , , i, sp]))
-    ts_A <- sapply(1:t, function(i) sum(abundanceA[, , , i, sp]))
-    ts_total <- ts_S + ts_J + ts_A
-    plot(ts_total,
-      type = "b", col = sp_cols[sp], lwd = 2,
-      ylim = c(0, max(ts_total, 1)), xlab = "Year", ylab = "Abundance",
-      main = paste0(state$species_ids[sp], " (t=", t, ")"), las = 1
-    )
-    lines(ts_S, type = "b", col = stage_cols[1], pch = 16, lty = 2)
-    lines(ts_J, type = "b", col = stage_cols[2], pch = 17, lty = 2)
-    lines(ts_A, type = "b", col = stage_cols[3], pch = 15, lty = 2)
-    legend("topleft",
-      legend = c("Total", "S", "J", "A"),
-      col = c(sp_cols[sp], stage_cols), lty = c(1, 2, 2, 2),
-      pch = c(NA, 16, 17, 15), cex = 0.6
-    )
-  }
-  plot(total[1:t],
-    type = "b", col = "black", lwd = 2,
-    ylim = c(0, max(total, 1)), xlab = "Year", ylab = "Abundance",
-    main = paste0("All species (t=", t, ")"), las = 1
-  )
-  lines(totalS[1:t], type = "b", col = stage_cols[1], pch = 16)
-  lines(totalJ[1:t], type = "b", col = stage_cols[2], pch = 17)
-  lines(totalA[1:t], type = "b", col = stage_cols[3], pch = 15)
-  abline(h = carCap * state$xDim * state$yDim * state$zDim, col = "red", lty = 2)
-  legend("topleft",
-    legend = c("Total", "S", "J", "A"),
-    col = c("black", stage_cols), lty = 1, pch = c(NA, 16, 17, 15), cex = 0.6
-  )
-  dev.flush()
-  Sys.sleep(sleeptime)
-}
-
-# ── Post-hoc abundance plot ───────────────────────────────────────────────────
-
-plot_abundance <- function(result, t = NULL, species_specific = TRUE) {
-  state <- result$state
-  t_max <- if (is.null(t)) length(result$totalabundanceA) else t
-  stage_cols <- scico::scico(3, palette = "lipari", begin = 0.2, end = 0.8)
-  sp_cols <- if (state$n_species == 1) {
-    scico::scico(3, palette = "lipari", begin = 0.3, end = 0.7)[2]
-  } else {
-    scico::scico(state$n_species, palette = "lipari", begin = 0.2, end = 0.8)
-  }
-  totalS <- result$totalabundanceS
-  totalJ <- result$totalabundanceJ
-  totalA <- result$totalabundanceA
-  total <- totalS + totalJ + totalA
-  n_panels <- if (species_specific) state$n_species + 1L else 1L
-  par(mfrow = c(1, n_panels), mar = c(4, 4, 3, 2))
-  if (species_specific) {
-    for (sp in 1:state$n_species) {
-      ts_S <- sapply(1:t_max, function(i) sum(result$abundanceS[, , , i, sp]))
-      ts_J <- sapply(1:t_max, function(i) sum(result$abundanceJ[, , , i, sp]))
-      ts_A <- sapply(1:t_max, function(i) sum(result$abundanceA[, , , i, sp]))
-      ts_total <- ts_S + ts_J + ts_A
-      plot(ts_total,
-        type = "b", col = sp_cols[sp], lwd = 2,
-        ylim = c(0, max(ts_total, 1)), xlab = "Year", ylab = "Abundance",
-        main = paste0(state$species_ids[sp], " (t=", t_max, ")"), las = 1
-      )
-      lines(ts_S, type = "b", col = stage_cols[1], pch = 16, lty = 2)
-      lines(ts_J, type = "b", col = stage_cols[2], pch = 17, lty = 2)
-      lines(ts_A, type = "b", col = stage_cols[3], pch = 15, lty = 2)
-      legend("topleft",
-        legend = c("Total", "S", "J", "A"),
-        col = c(sp_cols[sp], stage_cols), lty = c(1, 2, 2, 2),
-        pch = c(NA, 16, 17, 15), cex = 0.6
-      )
-    }
-  }
-  plot(total[1:t_max],
-    type = "b", col = "black", lwd = 2,
-    ylim = c(0, max(total[1:t_max], 1)), xlab = "Year", ylab = "Abundance",
-    main = paste0(state$site_name, " — All species (t=", t_max, ")"), las = 1
-  )
-  lines(totalS[1:t_max], type = "b", col = stage_cols[1], pch = 16)
-  lines(totalJ[1:t_max], type = "b", col = stage_cols[2], pch = 17)
-  lines(totalA[1:t_max], type = "b", col = stage_cols[3], pch = 15)
-  abline(h = state$carCap * state$xDim * state$yDim * state$zDim, col = "red", lty = 2)
-  legend("topleft",
-    legend = c("Total", "S", "J", "A"),
-    col = c("black", stage_cols), lty = 1, pch = c(NA, 16, 17, 15), cex = 0.6
-  )
-}
-
-# ── 3D post-hoc visualisation ─────────────────────────────────────────────────
-
-# Translucent point-cloud underlay shared by plot_3d_abundance() and
-# plot_3d_abundance_animated(): state$landscape is the full boolean canopy-
-# occupancy array already computed for the run, reused here purely as a
-# visual backdrop so abundance markers read as embedded in the canopy rather
-# than floating in empty space. Subsampled (default cap 20,000 voxels) --
-# this is a shape cue, not a faithful full-resolution render, and plotly gets
-# slow/heavy (especially the animated HTML export) well before every valid
-# voxel is actually needed to convey "there is canopy here."
-.canopy_context_trace <- function(state, max_points = 20000, seed = 1) {
-  idx <- which(state$landscape, arr.ind = TRUE)
-  if (nrow(idx) == 0) {
-    return(NULL)
-  }
-  if (nrow(idx) > max_points) {
-    set.seed(seed)
-    idx <- idx[sample.int(nrow(idx), max_points), , drop = FALSE]
-  }
-  data.frame(x = idx[, 1], y = idx[, 2], z = idx[, 3])
-}
-
-plot_3d_abundance <- function(result, t = NULL, show_canopy = TRUE,
-                              canopy_opacity = 0.05, canopy_max_points = 20000) {
-  state <- result$state
-  if (is.null(t)) t <- dim(result$abundanceA)[4]
-  sp_cols <- if (state$n_species == 1) {
-    scico::scico(3, palette = "lipari", begin = 0.3, end = 0.7)[2]
-  } else {
-    scico::scico(state$n_species, palette = "lipari", begin = 0.2, end = 0.8)
-  }
-  rows <- list()
-  for (sp in 1:state$n_species) {
-    sp_name <- state$species_ids[sp]
-    col <- sp_cols[sp]
-    for (stg in list(
-      list(arr = result$abundanceS, nm = "S", sym = "circle"),
-      list(arr = result$abundanceJ, nm = "J", sym = "diamond"),
-      list(arr = result$abundanceA, nm = "A", sym = "square")
-    )) {
-      idx <- which(stg$arr[, , , t, sp] > 0, arr.ind = TRUE)
-      if (nrow(idx) > 0) {
-        rows[[length(rows) + 1]] <- data.frame(
-          x = idx[, 1], y = idx[, 2], z = idx[, 3],
-          species = sp_name, stage = stg$nm, color = col, symbol = stg$sym,
-          stringsAsFactors = FALSE
-        )
-      }
-    }
-  }
-  if (length(rows) == 0) {
-    message("No individuals to plot at t=", t)
-    return(invisible(NULL))
-  }
-  df <- do.call(rbind, rows)
-  traces <- split(df, paste0(df$species, "_", df$stage))
-  fig <- plotly::plot_ly()
-  if (show_canopy) {
-    canopy_df <- .canopy_context_trace(state, max_points = canopy_max_points)
-    if (!is.null(canopy_df)) {
-      fig <- plotly::add_trace(fig,
-        data = canopy_df, x = ~x, y = ~y, z = ~z,
-        type = "scatter3d", mode = "markers",
-        name = "Canopy", showlegend = TRUE,
-        marker = list(
-          color = "#6b4423", size = 2,
-          opacity = canopy_opacity
-        )
-      )
-    }
-  }
-  for (tr in traces) {
-    fig <- plotly::add_trace(fig,
-      data = tr, x = ~x, y = ~y, z = ~z,
-      type = "scatter3d", mode = "markers",
-      name = paste0(tr$species[1], " ", tr$stage[1]),
-      marker = list(
-        symbol = tr$symbol[1], color = tr$color[1],
-        size = 6, opacity = 0.85
-      )
-    )
-  }
-  fig <- plotly::layout(fig,
-    title = paste0("Abundance (t=", t, ")"),
-    scene = list(
-      xaxis = list(title = "x"), yaxis = list(title = "y"),
-      zaxis = list(title = "height tier")
-    )
-  )
-  print(fig)
-  invisible(fig)
-}
-
-# Same idea as plot_3d_abundance() but across every timestep, using plotly's
-# built-in frame/animation support (play button + slider) instead of a
-# single static scatter. Saved as a self-contained HTML if out_path is
-# given. Not yet run against real output — verify once you have a result
-# worth animating (e.g. from a best_case replicate that actually persists).
-# The canopy-context trace (show_canopy=TRUE default, added 2026-07-24) in
-# particular needs a visual check: mixing an unframed static trace with a
-# framed animated one in the same figure is standard plotly behavior, but
-# wasn't exercised against a real result in this session -- open the saved
-# HTML once and confirm the canopy points stay put while the slider moves.
-plot_3d_abundance_animated <- function(result, out_path = NULL, show_canopy = TRUE,
-                                       canopy_opacity = 0.05, canopy_max_points = 20000) {
-  state <- result$state
-  n_t <- dim(result$abundanceA)[4]
-  sp_cols <- if (state$n_species == 1) {
-    scico::scico(3, palette = "lipari", begin = 0.3, end = 0.7)[2]
-  } else {
-    scico::scico(state$n_species, palette = "lipari", begin = 0.2, end = 0.8)
-  }
-
-  rows <- list()
-  for (t in seq_len(n_t)) {
-    for (sp in seq_len(state$n_species)) {
-      sp_name <- state$species_ids[sp]
-      col <- sp_cols[sp]
-      for (stg in list(
-        list(arr = result$abundanceS, nm = "S", sym = "circle"),
-        list(arr = result$abundanceJ, nm = "J", sym = "diamond"),
-        list(arr = result$abundanceA, nm = "A", sym = "square")
-      )) {
-        idx <- which(stg$arr[, , , t, sp] > 0, arr.ind = TRUE)
-        if (nrow(idx) > 0) {
-          rows[[length(rows) + 1]] <- data.frame(
-            x = idx[, 1], y = idx[, 2], z = idx[, 3], t = t,
-            species = sp_name, stage = stg$nm, color = col,
-            symbol = stg$sym, trace = paste0(sp_name, " ", stg$nm),
-            stringsAsFactors = FALSE
-          )
-        }
-      }
-    }
-  }
-  if (length(rows) == 0) {
-    message("No individuals to plot across any timestep")
-    return(invisible(NULL))
-  }
-  df <- do.call(rbind, rows)
-
-  # trace -> color lookup (one row per unique trace, in matching order —
-  # safer than pairing two independently-deduplicated vectors)
-  trace_lu <- df[!duplicated(df$trace), c("trace", "color")]
-  colors_named <- setNames(trace_lu$color, trace_lu$trace)
-
-  # Canopy trace is added first, with no `frame` mapping, so it renders as a
-  # static backdrop that persists unchanged across every animation frame
-  # (plotly supports mixing framed and unframed traces in one figure) --
-  # only the abundance trace below actually animates by year.
-  fig <- plotly::plot_ly()
-  if (show_canopy) {
-    canopy_df <- .canopy_context_trace(state, max_points = canopy_max_points)
-    if (!is.null(canopy_df)) {
-      fig <- plotly::add_trace(fig,
-        data = canopy_df, x = ~x, y = ~y, z = ~z,
-        type = "scatter3d", mode = "markers",
-        name = "Canopy", showlegend = TRUE,
-        marker = list(
-          color = "#6b4423", size = 2,
-          opacity = canopy_opacity
-        )
-      )
-    }
-  }
-  fig <- plotly::add_trace(
-    fig,
-    data = df, x = ~x, y = ~y, z = ~z, frame = ~t, color = ~trace,
-    colors = colors_named,
-    symbol = ~symbol, symbols = c(circle = "circle", diamond = "diamond", square = "square"),
-    type = "scatter3d", mode = "markers",
-    marker = list(size = 6, opacity = 0.85)
-  )
-  fig <- fig |>
-    plotly::layout(
-      title = "Abundance over time",
-      scene = list(
-        xaxis = list(title = "x"), yaxis = list(title = "y"),
-        zaxis = list(title = "height tier")
-      )
-    ) |>
-    plotly::animation_opts(frame = 400, transition = 200, redraw = TRUE) |>
-    plotly::animation_slider(currentvalue = list(prefix = "Year: "))
-
-  if (!is.null(out_path)) {
-    # selfcontained=TRUE needs pandoc (not installed on the cluster); FALSE
-    # writes a small "<name>_files/" dependency folder alongside the HTML
-    # instead -- keep the two together when copying/viewing elsewhere.
-    htmlwidgets::saveWidget(fig, out_path, selfcontained = FALSE)
-    message("Saved: ", out_path)
-  }
-  invisible(fig)
 }
 
 # ── Spin-up ───────────────────────────────────────────────────────────────────
@@ -2512,7 +2317,13 @@ run_experiment <- function(param_name, values, base = base_params,
       totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
       totalA = r$totalabundanceA,
       total = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
-      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0),
+      # 2026-08-28: `extinct` only checks adult presence -- a population
+      # that's just the founder cohort dying off with zero seedling/
+      # juvenile replacement still reads "persisting". `recruited` makes
+      # that distinction explicit: any S or J individuals in the same
+      # second-half window used for `extinct`.
+      recruited = any(c(r$totalabundanceS[(T %/% 2):T], r$totalabundanceJ[(T %/% 2):T]) > 0)
     )
   }, mc.cores = N_CORES)
 
@@ -2587,7 +2398,9 @@ run_factorial_experiment <- function(param_values, base = base_params,
       totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
       totalA = r$totalabundanceA,
       total = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
-      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0),
+      # See run_experiment()'s matching `recruited` column for rationale.
+      recruited = any(c(r$totalabundanceS[(T %/% 2):T], r$totalabundanceJ[(T %/% 2):T]) > 0)
     )
     for (nm in param_names) df[[nm]] <- jobs[[nm]][i]
     df
@@ -2705,7 +2518,9 @@ run_replicated <- function(params, n_reps = 1, timesteps = 20, spinup = 3,
       totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
       totalA = r$totalabundanceA,
       total = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
-      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0),
+      # See run_experiment()'s matching `recruited` column for rationale.
+      recruited = any(c(r$totalabundanceS[(T %/% 2):T], r$totalabundanceJ[(T %/% 2):T]) > 0)
     )
   }))
 

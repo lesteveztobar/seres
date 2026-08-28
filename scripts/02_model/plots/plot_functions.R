@@ -7,9 +7,11 @@
 # pipeline and it just draws whatever is available so far.
 #
 # Refactored from the standalone plotmap.R / plot_temperatures.R /
-# plot_bestfit_3d.R, plus new export wrappers around the plot_abundance() /
-# plot_3d_abundance() / plot_experiment() functions already defined in
-# get_colonization.R.
+# plot_bestfit_3d.R, plus .plot_live()/plot_abundance()/.canopy_context_
+# trace()/plot_3d_abundance()/plot_3d_abundance_animated() (moved here from
+# get_colonization.R -- pure visualization, no climate/niche logic) and
+# export wrappers around them, plus plot_experiment() which is still defined
+# in get_colonization.R.
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 library(ggplot2)
@@ -18,8 +20,10 @@ library(plotly)
 library(htmlwidgets)
 library(abind)
 library(scatterplot3d)
+library(scico)
 
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 source("scripts/02_model/engine/get_colonization.R")
 
 # ── Field site map ─────────────────────────────────────────────────────────────
@@ -158,33 +162,31 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
 plot_tree_diagram <- function(forestparams = list(mean_hgt = 8.4, mean_crown_r = 2.0,
                                                     trunk_r = 0.114),
                                out_dir = OUTPUT_DIR, res = 0.25) {
-  th <- forestparams$mean_hgt
-  cr <- forestparams$mean_crown_r
+  tree_height <- forestparams$mean_hgt
+  crown_r <- forestparams$mean_crown_r
 
-  heights      <- seq(0.5, th, by = res)
-  half_extent  <- ceiling(cr / res) * res
+  heights      <- seq(0.5, tree_height, by = res)
+  half_extent  <- ceiling(crown_r / res) * res
   xy           <- seq(-half_extent, half_extent, by = res)
 
   rows <- list()
   for (h in heights) {
-    rel_h <- h / th
-    # Same thresholds as build_forest() (get_colonization.R) -- keep in sync.
-    jzone <- if      (rel_h < 0.10) 1L
-             else if (rel_h < 0.30) 2L
-             else if (rel_h < 0.50) 3L
-             else if (rel_h < 0.80) 4L
-             else                   5L
-    if (jzone <= 2) {
-      rows[[length(rows) + 1]] <- data.frame(x = 0, y = 0, z = h, zone = jzone)
+    rel_height <- h / tree_height
+    # Same geometry as build_forest() (get_colonization.R) -- calls its
+    # .classify_tree_zone()/.crown_fraction()/.effective_crown_radius()
+    # helpers directly rather than re-deriving the thresholds/formula here,
+    # so this stays in sync automatically.
+    zone_id <- .classify_tree_zone(rel_height)
+    if (zone_id <= 2) {
+      rows[[length(rows) + 1]] <- data.frame(x = 0, y = 0, z = h, zone = zone_id)
     } else {
-      crown_fraction <- (rel_h - 0.30) / 0.70
-      effective_r    <- cr * sin(crown_fraction * pi)
+      effective_r <- .effective_crown_radius(crown_r, rel_height)
       if (effective_r <= 0) next
       grid      <- expand.grid(x = xy, y = xy)
       grid$dist <- sqrt(grid$x^2 + grid$y^2)
-      grid      <- grid[grid$dist <= effective_r, ]
+      grid      <- grid[.voxel_in_tree(zone_id, grid$dist, effective_r), ]
       if (nrow(grid) == 0) next
-      rows[[length(rows) + 1]] <- data.frame(x = grid$x, y = grid$y, z = h, zone = jzone)
+      rows[[length(rows) + 1]] <- data.frame(x = grid$x, y = grid$y, z = h, zone = zone_id)
     }
   }
   pts <- do.call(rbind, rows)
@@ -212,7 +214,7 @@ plot_tree_diagram <- function(forestparams = list(mean_hgt = 8.4, mean_crown_r =
     color = zone_cols[as.character(pts$zone)],
     pch = 16, cex.symbols = 0.5,
     xlab = "x (m)", ylab = "y (m)", zlab = "Height (m)",
-    main = sprintf("Modelled tree geometry\n(height = %.1f m, crown radius = %.1f m)", th, cr),
+    main = sprintf("Modelled tree geometry\n(height = %.1f m, crown radius = %.1f m)", tree_height, crown_r),
     cex.main = 1.1,
     angle = 55, scale.y = 0.7, grid = TRUE, box = FALSE,
     col.axis = "grey40", col.grid = "grey88", col.lab = "grey20",
@@ -231,10 +233,11 @@ plot_tree_diagram <- function(forestparams = list(mean_hgt = 8.4, mean_crown_r =
 
 plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
                                       processed_dir = PROCESSED_DIR,
-                                      height_step = 0.25) {
-  # height_step defaults to 0.25 (the production resolution used everywhere
-  # else in this pipeline -- run_colonization.R, characterize_niches.R
-  # -- via the same manifest_suffix convention), NOT the unsuffixed 0.1m file.
+                                      height_step = 0.4) {
+  # height_step defaults to 0.4 (the production resolution as of
+  # 2026-08-17, was 0.25 -- used everywhere else in this pipeline --
+  # run_colonization.R, characterize_niches.R -- via the same
+  # manifest_suffix convention), NOT the unsuffixed 0.1m file.
   # 2026-07-17: this function used to hardcode the unsuffixed name, which only
   # Maquipucuna happens to have (and at ~2.5x more height tiers than the
   # 0.25m file, ~168 vs ~67) -- every other site was silently skipped with
@@ -252,18 +255,20 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   # and the old format where each height is embedded as its own list element.
   #
   # Stream one height at a time instead of loading every height's full raw
-  # per-timestep spatial array into memory at once -- each height's raw
-  # tmax/tmin object is ~6 GB (48 hourly rasters), and with ~170 heights
-  # that's >1 TB, reliably OOM-killing the job regardless of how much memory
-  # is requested. Everything downstream (volume plot, cross-section heatmap,
-  # boxplot) only ever needs the time-averaged 2D Tz layer per height, so
-  # reduce immediately on load and keep only that (tiny) result.
+  # per-timestep spatial array into memory at once -- raw hourly per-pixel
+  # arrays no longer exist on disk at all as of the 2026-08-05 write-time
+  # quantile-reduction move (get_colonization.R's .compute_voxel_quantiles()/
+  # get_clim_voxel()); each height file now carries per-pixel quantiles
+  # instead. The per-pixel annual median temperature (the "annual"/"both"
+  # daypart quantile's 50th percentile, one value per raster pixel) is this
+  # function's closest available equivalent to the old per-pixel annual
+  # MEAN -- both are a single robust central-tendency value per pixel, and
+  # this still needs (and gets) full per-pixel spatial resolution, unlike
+  # the separately-flattened lookup_climate_by_height() pathway.
   tz_layers <- lapply(heights_m, function(hgt) {
     h <- load_height(env, hgt)
-    # New format (h$tme present, full-year rewrite): Tz sits at the top
-    # level, no tmax/tmin day-type split. Old format: nested under $tmax.
-    r <- if (!is.null(h$tme)) h$Tz else h$tmax$Tz
-    if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
+    vq <- h$voxel_quantiles
+    matrix(vq$quantiles[["annual_both_temp"]][, 3], nrow = vq$nr, ncol = vq$nc)
   })
   vol_tmax <- abind::abind(tz_layers, along = 3)
 
@@ -343,9 +348,7 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   dunn_df <- data.frame(
     comparison = dunn_res$comparisons,
     p_adj      = dunn_res$P.adjusted,
-    sig        = ifelse(dunn_res$P.adjusted < 0.001, "***",
-                 ifelse(dunn_res$P.adjusted < 0.01,  "**",
-                 ifelse(dunn_res$P.adjusted < 0.05,  "*", "ns")))
+    sig        = .sig_stars(dunn_res$P.adjusted)  # shared_helpers.R
   )
   message("Pairwise Dunn tests (Holm-adjusted):")
   print(dunn_df[order(dunn_df$p_adj), ], row.names = FALSE)
@@ -557,7 +560,9 @@ plot_colonization_experiment <- function(site_name, exp_tag, out_dir = OUTPUT_DI
 # of most direct interest. Mirrors the simple model's Fig. 5 (report.pdf
 # sec. 3.3), generalized past a single facet variable via facet_grid.
 plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factorial",
-                                      out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR) {
+                                      out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR,
+                                      metric = c("extinction", "survival")) {
+  metric <- match.arg(metric)
   in_path <- file.path(processed_dir, sprintf("colonization_%s_%s.rds", site_name, exp_tag))
   if (!file.exists(in_path)) {
     message("Skipping ", site_name, " / ", exp_tag, " -- no results at ", in_path)
@@ -569,8 +574,8 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
             " -- not a factorial result, use plot_colonization_experiment() instead")
     return(invisible(NULL))
   }
-  fixed_cols <- c("rep", "t", "totalS", "totalJ", "totalA", "total", "extinct")
-  swept <- setdiff(names(result), fixed_cols)
+  shape <- .classify_result_shape(result)  # shared_helpers.R
+  swept <- shape$swept
   if ("n_founders" %in% swept) swept <- c("n_founders", setdiff(swept, "n_founders"))
   if (length(swept) < 2) {
     message("Skipping ", site_name, " / ", exp_tag,
@@ -578,26 +583,37 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
     return(invisible(NULL))
   }
 
-  t_max <- max(result$t)
-  final <- result[result$t == t_max, ]
-  form  <- as.formula(paste("cbind(extinct, total) ~", paste(swept, collapse = " + ")))
-  combo_summary <- aggregate(form, data = final, FUN = mean)
+  t_max <- shape$t_max
+  combo_summary <- shape$combo
+  # combo$extinct is already the per-combo MEAN extinction rate (extinct is a
+  # 0/1 flag per replicate, aggregated with FUN=mean in .classify_result_
+  # shape()) -- so 1-extinct is directly the survival rate, not just a
+  # majority-vote boolean like combo$persisted.
+  combo_summary$survival <- 1 - combo_summary$extinct
 
   x_var <- swept[1]; y_var <- swept[2]
   facet_vars <- swept[-(1:2)]
 
+  fill_var   <- if (metric == "survival") "survival" else "extinct"
+  legend_lab <- if (metric == "survival") "Survival\nrate" else "Extinction\nrate"
+  subtitle_lab <- if (metric == "survival") "Survival rate" else "Extinction rate"
+  # Reversed ramp for survival so high (good) still reads as the "safe" blue
+  # end and low (bad) as red, matching the extinction ramp's color sense
+  # rather than just flipping the number and keeping red-for-high.
+  ramp <- if (metric == "survival")
+    c("#a50026", "#f1a340", "#08519c") else c("#08519c", "#f1a340", "#a50026")
+
   p <- ggplot(combo_summary,
-             aes(x = factor(.data[[x_var]]), y = factor(.data[[y_var]]), fill = extinct)) +
+             aes(x = factor(.data[[x_var]]), y = factor(.data[[y_var]]), fill = .data[[fill_var]])) +
     geom_tile() +
-    scale_fill_gradientn(colours = c("#08519c", "#f1a340", "#a50026"),
-                         limits = c(0, 1), name = "Extinction\nrate") +
+    scale_fill_gradientn(colours = ramp, limits = c(0, 1), name = legend_lab) +
     labs(x = x_var, y = y_var,
          title = sprintf("Factorial — %s", site_name),
          subtitle = if (length(facet_vars) > 0)
-           sprintf("Extinction rate at year %d, faceted by %s",
-                   t_max, paste(facet_vars, collapse = " x "))
+           sprintf("%s at year %d, faceted by %s",
+                   subtitle_lab, t_max, paste(facet_vars, collapse = " x "))
          else
-           sprintf("Extinction rate at year %d", t_max)) +
+           sprintf("%s at year %d", subtitle_lab, t_max)) +
     theme_minimal(base_size = 11)
 
   if (length(facet_vars) == 1) {
@@ -610,8 +626,115 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
               " collapsed via aggregation.")
   }
 
-  out_path <- file.path(out_dir, sprintf("factorial_%s_%s.png", site_name, exp_tag))
+  suffix <- if (metric == "survival") "_survival" else ""
+  out_path <- file.path(out_dir, sprintf("factorial_%s_%s%s.png", site_name, exp_tag, suffix))
   ggsave(out_path, plot = p, width = 12, height = 8, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# Every pairwise combination of the 4 reproduction_factorial_v3 swept
+# params, each as its own small heatmap, filled by % change in final
+# abundance relative to the literature-realistic baseline -- a sibling to
+# plot_factorial_experiment() above (which stays as-is: 2 params as tile
+# axes + the rest faceted, filled by extinction/survival), not a
+# replacement. Answers "which parameter(s) actually move abundance",
+# distinct from plot_factorial_experiment()'s "where does this specific
+# 2-axis slice go extinct". 2026-08-25.
+plot_factorial_pairwise_heatmap <- function(site_name, exp_tag = "reproduction_factorial_v3",
+                                            out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR) {
+  in_path <- file.path(processed_dir, sprintf("colonization_%s_%s.rds", site_name, exp_tag))
+  if (!file.exists(in_path)) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- no results at ", in_path)
+    return(invisible(NULL))
+  }
+  result <- readRDS(in_path)
+  if (!is.data.frame(result) || "param_value" %in% names(result)) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- not a factorial result")
+    return(invisible(NULL))
+  }
+  shape <- .classify_result_shape(result)  # shared_helpers.R
+  swept <- shape$swept
+  if (length(swept) < 2) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- fewer than 2 swept columns found (", paste(swept, collapse = ", "), ")")
+    return(invisible(NULL))
+  }
+  # Subtitle below is hardcoded to reproduction_factorial_v3's own 4 params
+  # (this function's documented target) -- guard against a differently-
+  # shaped factorial (e.g. only 2-3 swept cols) hitting an undefined field.
+  if (!all(c("p_poll", "p_germ", "p_s1", "n_founders") %in% swept)) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- plot_factorial_pairwise_heatmap() expects exactly p_poll/p_germ/p_s1/n_founders, found: ",
+            paste(swept, collapse = ", "))
+    return(invisible(NULL))
+  }
+  t_max <- shape$t_max
+  final <- result[result$t == t_max, ]
+
+  # Baseline = the literature-realistic combo -- confirmed (make_params.R,
+  # params_reprofactorial_v3) to be exactly the FIRST level of every swept
+  # param (p_poll=0.30, p_germ=0.00100, p_s1=0.450, n_founders=30), i.e. a
+  # literal row already in this data -- no separate "realistic" run needed.
+  baseline_vals <- setNames(lapply(swept, function(v) sort(unique(final[[v]]))[1]), swept)
+  baseline_mask <- Reduce(`&`, lapply(swept, function(v) final[[v]] == baseline_vals[[v]]))
+  if (!any(baseline_mask)) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- literature-realistic baseline combo not found in this data")
+    return(invisible(NULL))
+  }
+  baseline_abundance <- mean(final$total[baseline_mask])
+
+  # Best combo -- same aggregate()+which.max logic as pick_best_combo.R,
+  # reused rather than reimplemented.
+  combo_form <- as.formula(paste("total ~", paste(swept, collapse = " + ")))
+  combo_agg  <- aggregate(combo_form, data = final, FUN = mean)
+  best_combo <- combo_agg[which.max(combo_agg$total), ]
+
+  # effect_size (2026-08-28, replaces raw pct_change): 100 * mean_total /
+  # best_combo$total. Naturally bounded to [0, 100] with no clamping needed
+  # -- abundance is never negative, and best_combo$total is by construction
+  # the maximum mean-total among all 625 tested combos for this site, so
+  # every other combo's total is <= it. This fixes two things at once: (1)
+  # pct_change was unbounded and each of the 6 panels trained its own
+  # independent color scale (plot_layout(guides="collect") only visually
+  # merges legends that already match, so it was silently misrepresenting
+  # 6 different scales as one) -- fixed limits=c(0,100) make the scale
+  # trivially, truthfully shared across every panel; (2) reusing the same
+  # scico "lipari" 0-100 ramp as the niche-suitability figures unifies the
+  # report's visual language for "0-100 suitability-style" scores.
+  pairs <- combn(swept, 2, simplify = FALSE)
+  panels <- lapply(pairs, function(pr) {
+    A <- pr[1]; B <- pr[2]
+    form <- as.formula(paste("total ~", A, "+", B))
+    agg  <- aggregate(form, data = final, FUN = mean)
+    agg$effect_size <- 100 * agg$total / best_combo$total
+    agg$is_best <- agg[[A]] == best_combo[[A]] & agg[[B]] == best_combo[[B]]
+    agg$is_baseline <- agg[[A]] == baseline_vals[[A]] & agg[[B]] == baseline_vals[[B]]
+
+    ggplot(agg, aes(x = factor(.data[[A]]), y = factor(.data[[B]]), fill = effect_size)) +
+      geom_tile() +
+      geom_tile(data = agg[agg$is_baseline, ], fill = NA, colour = "white",
+               linewidth = 1, linetype = "dashed") +
+      geom_tile(data = agg[agg$is_best, ], fill = NA, colour = "black", linewidth = 1) +
+      scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
+                           limits = c(0, 100), name = "Effect size\n(0-100)") +
+      labs(x = A, y = B) +
+      theme_minimal(base_size = 10)
+  })
+
+  p <- patchwork::wrap_plots(panels, nrow = 2) +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+      title = sprintf("Factorial parameter effects — %s", site_name),
+      subtitle = sprintf(
+        "Effect size: 0 = extinct, 100 = this site's best-tested combo (black outline) | Baseline (literature-realistic, dashed white outline): p_poll=%.2f, p_germ=%.4f, p_s1=%.2f, n_founders=%d -> N=%.1f (effect size %.0f) | Best: p_poll=%.2f, p_germ=%.4f, p_s1=%.2f, n_founders=%d -> N=%.1f",
+        baseline_vals$p_poll, baseline_vals$p_germ, baseline_vals$p_s1, baseline_vals$n_founders,
+        baseline_abundance, 100 * baseline_abundance / best_combo$total,
+        best_combo$p_poll, best_combo$p_germ, best_combo$p_s1, best_combo$n_founders, best_combo$total))
+
+  out_path <- file.path(out_dir, sprintf("factorial_pairwise_%s_%s.png", site_name, exp_tag))
+  ggsave(out_path, plot = p, width = 16, height = 9, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
 }
@@ -628,9 +751,9 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
 # microenv) or, for Maquipucuna (which has both), rebuilt an unnecessarily
 # large 168-tier cache instead of the 67-tier 0.25m one, slow enough to blow
 # through run_plots.sh's 2-hour budget on its own.
-.niche_plot_context <- function(site_name, processed_dir = PROCESSED_DIR, height_step = 0.25) {
+.niche_plot_context <- function(site_name, processed_dir = PROCESSED_DIR, height_step = 0.4,
+                                niche_cache_path = NICHE_CACHE_PATH) {
   manifest_suffix  <- if (height_step != 0.1) sprintf("_h%.2f", height_step) else ""
-  niche_cache_path <- file.path(processed_dir, "species_niches.rds")
   microenv_path    <- file.path(processed_dir, sprintf("microenv_%s%s.rds", site_name, manifest_suffix))
   if (!file.exists(niche_cache_path) || !file.exists(microenv_path)) {
     message("No niche context for ", site_name, " -- need both ",
@@ -642,9 +765,13 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
   heights     <- microenv_heights(microenv)
 
   message("Building climate cache for ", site_name, " (reads all ", length(heights), " height files once)...")
-  cc <- build_clim_cache(microenv)
+  cc <- build_clim_cache_voxel(microenv)
 
-  height_scalars      <- height_clim_scalars(cc$clim_by_height)
+  # No landscape/footprint defined for this diagnostic (no simulated grid
+  # the way init_colonization() has) -- footprint = NULL pools per-height
+  # quantiles across the whole raster, same one-row-per-height shape
+  # height_clim_scalars() used to produce (see get_colonization.R).
+  height_scalars      <- voxel_background_table(cc, microenv, footprint = NULL, months = "annual")
   landscape_clim_vals <- height_scalars[stats::complete.cases(height_scalars), , drop = FALSE]
 
   niches <- load_observations()
@@ -652,8 +779,13 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
                    !is.na(niches$Height_m) & !is.na(niches$FinalID), ]
   site_obs <- niches[niches$Area_or_Site == site_name, ]
 
+  # `niches` (the full, un-site-filtered table) is carried through so callers
+  # can check genuine identification via .confirmed_species_sites()
+  # (shared_helpers.R), which needs the raw Identification column across
+  # every site, not just this one -- see .niche_score_rows()'s species
+  # filter fix, 2026-08-28.
   list(niche_cache = niche_cache, heights = heights, height_scalars = height_scalars,
-       landscape_clim_vals = landscape_clim_vals, site_obs = site_obs)
+       landscape_clim_vals = landscape_clim_vals, site_obs = site_obs, niches = niches)
 }
 
 # ── Niche suitability: per-axis scores, and the combined score before/after
@@ -679,7 +811,7 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
 # See check_niche_suitability.R for the text-only per-species version.
 plot_niche_suitability <- function(site_name, out_dir = OUTPUT_DIR,
                                     processed_dir = PROCESSED_DIR,
-                                    height_step = 0.25,
+                                    height_step = 0.4,
                                     extra_species = character(0),
                                     context = NULL) {
   ctx <- context %||% .niche_plot_context(site_name, processed_dir, height_step)
@@ -694,7 +826,14 @@ plot_niche_suitability <- function(site_name, out_dir = OUTPUT_DIR,
   clim_by_height <- lapply(seq_len(nrow(height_scalars)), function(i) as.list(height_scalars[i, ]))
   clim_by_height <- Filter(function(cl) !anyNA(unlist(cl)), clim_by_height)
 
-  site_species <- sort(unique(c(site_obs$FinalID, extra_species)))
+  # See .niche_score_rows() for why this filters on genuine identification
+  # (.confirmed_species_sites(), shared_helpers.R) rather than the
+  # post-default FinalID.
+  candidate_species <- sort(unique(c(site_obs$FinalID, extra_species)))
+  site_species <- candidate_species[
+    candidate_species %in% extra_species |
+    vapply(candidate_species, function(sp) site_name %in% .confirmed_species_sites(sp, ctx$niches), logical(1))
+  ]
   site_species <- site_species[!vapply(niche_cache[site_species], is.null, logical(1))]
   if (length(site_species) == 0) {
     message("Skipping ", site_name, " niche suitability -- no cached niches for this site's species")
@@ -767,29 +906,59 @@ plot_niche_suitability <- function(site_name, out_dir = OUTPUT_DIR,
 # get_colonization.R. species_niches.rds must already exist
 # (characterize_niches.R). context: see plot_niche_suitability() -- pass a
 # pre-built .niche_plot_context() to skip rebuilding the climate cache.
-plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
-                                       processed_dir = PROCESSED_DIR,
-                                       height_step = 0.25,
-                                       extra_species = character(0),
-                                       context = NULL) {
-  ctx <- context %||% .niche_plot_context(site_name, processed_dir, height_step)
-  if (is.null(ctx)) {
-    message("Skipping ", site_name, " niche profile curves -- no context available")
-    return(invisible(NULL))
-  }
+# ── Shared per-species x per-height suitability score matrix ───────────────
+# Factored out of plot_niche_profile_curves() (2026-08-24) so the new
+# heatmap version (plot_niche_suitability_heatmap()) computes the exact same
+# numbers instead of duplicating the niche-scoring math -- both just re-
+# encode this same (species, height, before, after) table differently
+# (geom_line vs geom_tile). Returns NULL (with a message()) for the same
+# "no context" / "no cached niches" cases the line-plot already handles, so
+# both callers can share one skip-and-continue check.
+.niche_score_rows <- function(ctx, site_name, extra_species = character(0)) {
   niche_cache <- ctx$niche_cache; heights <- ctx$heights
   height_scalars <- ctx$height_scalars; landscape_clim_vals <- ctx$landscape_clim_vals
   site_obs <- ctx$site_obs
   valid_h  <- which(stats::complete.cases(height_scalars))
 
-  site_species <- sort(unique(c(site_obs$FinalID, extra_species)))
+  # 2026-08-28: filter site_obs$FinalID down to species this site actually,
+  # genuinely had identified -- not the post-default FinalID, which
+  # silently relabels every blank/unverified-photo row as "Maxillaria
+  # acutifolia" (load_observations(), paths.R). Without this, a site with
+  # mostly-unidentified observations (e.g. LaElenita/MindoMirador/Saloya)
+  # borrows a well-supported niche model built from OTHER sites' genuine
+  # acutifolia sightings, making its suitability figure look convincing for
+  # reasons that have nothing to do with that site's own plants. Reuses
+  # .confirmed_species_sites() (shared_helpers.R) rather than duplicating
+  # its raw-Identification-column logic. extra_species (explicitly
+  # requested by the caller) is exempt from this filter.
+  candidate_species <- sort(unique(c(site_obs$FinalID, extra_species)))
+  site_species <- candidate_species[
+    candidate_species %in% extra_species |
+    vapply(candidate_species, function(sp) site_name %in% .confirmed_species_sites(sp, ctx$niches), logical(1))
+  ]
   site_species <- site_species[!vapply(niche_cache[site_species], is.null, logical(1))]
   if (length(site_species) == 0) {
-    message("Skipping ", site_name, " niche profile curves -- no cached niches for this site's species")
-    return(invisible(NULL))
+    message("Skipping ", site_name, " -- no cached niches for this site's species")
+    return(NULL)
+  }
+  if (length(valid_h) == 0) {
+    # 2026-08-25: confirmed pre-existing, NOT specific to this site or
+    # introduced by this refactor -- voxel_background_table(footprint=NULL)
+    # (get_colonization.R) synthesizes NA lon/lat "observations" intending
+    # to pool across every pixel per height, but .voxel_point_quantile()'s
+    # pixel-mode branch (the mode every real production microenv uses) has
+    # no such pooling path for NA coordinates -- .lonlat_to_pixel(NA, NA)
+    # never matches any pixel, so height_scalars comes back entirely NA for
+    # every site tested (Maquipucuna, MindoMirador). Without this check,
+    # `data.frame(species=sp, height=heights[valid_h], before=before,
+    # after=after)` recycles the length-1 `species=sp` against length-0
+    # height/before/after and errors ("differing number of rows: 1, 0").
+    message("Skipping ", site_name,
+      " -- no height tier has complete landscape climate data (see voxel_background_table() NULL-footprint note)")
+    return(NULL)
   }
 
-  rows <- do.call(rbind, lapply(site_species, function(sp) {
+  do.call(rbind, lapply(site_species, function(sp) {
     niche_sp <- niche_cache[[sp]]
     obs_sp   <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
     obs_clim_vals <- if (nrow(obs_sp) > 0) {
@@ -805,6 +974,24 @@ plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
 
     data.frame(species = sp, height = heights[valid_h], before = before, after = after)
   }))
+}
+
+plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
+                                       processed_dir = PROCESSED_DIR,
+                                       height_step = 0.4,
+                                       extra_species = character(0),
+                                       context = NULL) {
+  ctx <- context %||% .niche_plot_context(site_name, processed_dir, height_step)
+  if (is.null(ctx)) {
+    message("Skipping ", site_name, " niche profile curves -- no context available")
+    return(invisible(NULL))
+  }
+  rows <- .niche_score_rows(ctx, site_name, extra_species)
+  if (is.null(rows)) {
+    message("Skipping ", site_name, " niche profile curves -- no cached niches for this site's species")
+    return(invisible(NULL))
+  }
+  site_species <- sort(unique(rows$species))
 
   long_df <- rbind(
     data.frame(species = rows$species, height = rows$height, score = rows$before,
@@ -832,6 +1019,656 @@ plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
   ggsave(out_path, plot = p, width = 12, height = 5.5, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
+}
+
+# Species (y) x height (x) suitability heatmap -- the "hotbox" version of
+# plot_niche_profile_curves() above: same (species, height, before/after)
+# score table via .niche_score_rows(), re-encoded as geom_tile instead of
+# geom_line so every species x height cell's suitability is readable at a
+# glance instead of needing to trace overlapping lines. No continuous
+# suitability fill convention existed anywhere in this codebase before this
+# (confirmed 2026-08-24) -- scico "lipari" chosen to match the discrete
+# species/stage palette already used everywhere else (.species_colors()/
+# .stage_colors(), shared_helpers.R), rather than introducing an unrelated
+# palette family just for this one plot.
+plot_niche_suitability_heatmap <- function(site_name, out_dir = OUTPUT_DIR,
+                                           processed_dir = PROCESSED_DIR,
+                                           height_step = 0.4,
+                                           extra_species = character(0),
+                                           context = NULL) {
+  ctx <- context %||% .niche_plot_context(site_name, processed_dir, height_step)
+  if (is.null(ctx)) {
+    message("Skipping ", site_name, " niche suitability heatmap -- no context available")
+    return(invisible(NULL))
+  }
+  rows <- .niche_score_rows(ctx, site_name, extra_species)
+  if (is.null(rows)) {
+    message("Skipping ", site_name, " niche suitability heatmap -- no cached niches for this site's species")
+    return(invisible(NULL))
+  }
+
+  long_df <- rbind(
+    data.frame(species = rows$species, height = rows$height, score = rows$before,
+               stage = "Before ceiling rescale"),
+    data.frame(species = rows$species, height = rows$height, score = rows$after,
+               stage = "After ceiling rescale")
+  )
+  long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+
+  p <- ggplot(long_df, aes(x = height, y = species, fill = score)) +
+    geom_tile() +
+    scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
+                         limits = c(0, 100), name = "Suitability\n(0-100)") +
+    facet_wrap(~stage, nrow = 1) +
+    labs(x = "Height (m)", y = "Species",
+         title = sprintf("Niche suitability hotbox — %s", site_name)) +
+    theme_minimal(base_size = 11)
+
+  out_path <- file.path(out_dir, sprintf("niche_suitability_heatmap_%s.png", site_name))
+  ggsave(out_path, plot = p, width = 12, height = 5.5, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Combined, all-sites niche-suitability data prep ─────────────────────────
+# Shared by plot_niche_suitability_grid() and plot_niche_height_trees()
+# (2026-08-28) -- both need the exact same (site, species, height,
+# before/after) long table, just re-encoded with different aesthetics
+# (site as facet row vs. site as x-position). Builds each site's context
+# fresh (.niche_plot_context()) and calls the now-fixed .niche_score_rows()
+# (genuine-identification filter), tags rows with `site`, and drops/reports
+# any site left with zero confirmed species after that filter -- same
+# skip-and-message convention as everywhere else in this file.
+.niche_score_rows_all_sites <- function(sites = NULL, processed_dir = PROCESSED_DIR,
+                                         height_step = 0.4) {
+  if (is.null(sites)) {
+    files <- list.files(processed_dir, pattern = sprintf("^microenv_.*_h%.2f\\.rds$", height_step))
+    sites <- sub(sprintf("^microenv_(.*)_h%.2f\\.rds$", height_step), "\\1", files)
+  }
+  excluded <- character(0)
+  rows_by_site <- lapply(sites, function(site_name) {
+    ctx <- .niche_plot_context(site_name, processed_dir, height_step)
+    if (is.null(ctx)) {
+      excluded[[length(excluded) + 1]] <<- site_name
+      return(NULL)
+    }
+    rows <- .niche_score_rows(ctx, site_name)
+    if (is.null(rows)) {
+      excluded[[length(excluded) + 1]] <<- site_name
+      return(NULL)
+    }
+    cbind(site = site_name, rows)
+  })
+  all_rows <- do.call(rbind, Filter(Negate(is.null), rows_by_site))
+  if (length(excluded) > 0) {
+    message("Excluded (no confirmed species): ", paste(excluded, collapse = ", "))
+  }
+  list(rows = all_rows, excluded = excluded)
+}
+
+# Combined niche-suitability heatmap: EVERY site's suitability in one figure,
+# grouped per species -- the "which parameter/site actually offers a
+# suitable niche for species X" view, replacing the need to flip between N
+# separate per-site heatmaps. y = site (not species, unlike the per-site
+# version above) so each species' panel directly compares every site that
+# has it; same scico "lipari" 0-100 fill and Before/After ceiling-rescale
+# facet convention as plot_niche_suitability_heatmap(), just with species as
+# a second facet dimension instead of the y-axis. 2026-08-28.
+plot_niche_suitability_grid <- function(sites = NULL, out_dir = OUTPUT_DIR,
+                                        processed_dir = PROCESSED_DIR,
+                                        height_step = 0.4, built = NULL) {
+  # built: pass a pre-computed .niche_score_rows_all_sites() result (e.g.
+  # shared with plot_niche_height_trees(), see plot_new_figures.R) to skip
+  # rebuilding every site's climate cache a second time -- 2026-08-28, this
+  # was previously rebuilt independently by each of the two combined
+  # figures (14 full climate-cache builds across 7 sites instead of 7),
+  # slow enough on the login node to be killed partway through.
+  built <- built %||% .niche_score_rows_all_sites(sites, processed_dir, height_step)
+  rows <- built$rows
+  if (is.null(rows) || nrow(rows) == 0) {
+    message("Skipping niche suitability grid -- no sites had confirmed species")
+    return(invisible(NULL))
+  }
+
+  long_df <- rbind(
+    data.frame(site = rows$site, species = rows$species, height = rows$height,
+               score = rows$before, stage = "Before ceiling rescale"),
+    data.frame(site = rows$site, species = rows$species, height = rows$height,
+               score = rows$after, stage = "After ceiling rescale")
+  )
+  long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+
+  subtitle <- if (length(built$excluded) > 0) {
+    sprintf("Excluded (no confirmed species): %s", paste(built$excluded, collapse = ", "))
+  } else {
+    NULL
+  }
+
+  p <- ggplot(long_df, aes(x = height, y = site, fill = score)) +
+    geom_tile() +
+    scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
+                         limits = c(0, 100), name = "Suitability\n(0-100)") +
+    facet_grid(species ~ stage) +
+    labs(x = "Height (m)", y = "Site", title = "Niche suitability by species — all sites",
+         subtitle = subtitle) +
+    theme_minimal(base_size = 11)
+
+  out_path <- file.path(out_dir, "niche_suitability_grid_all_sites.png")
+  n_species <- length(unique(long_df$species))
+  ggsave(out_path, plot = p, width = 12, height = max(6, 2 + 1.1 * n_species), dpi = 300,
+        bg = "white", limitsize = FALSE)
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# "Tree" figure: the same all-sites suitability data as
+# plot_niche_suitability_grid(), re-encoded with site as the x-position
+# (a narrow vertical bar per site) and height as y -- each site's bar reads
+# as a shaded trunk, its color tracing suitability along its height, instead
+# of a species-colored line (plot_niche_profile_curves()'s "too loud with
+# many species" problem this replaces -- species is now the facet variable,
+# not a colour aesthetic, so there's no species legend to get crowded).
+# Same facet_grid(species ~ stage) as the grid heatmap for visual/code
+# consistency between the two. 2026-08-28.
+plot_niche_height_trees <- function(sites = NULL, out_dir = OUTPUT_DIR,
+                                    processed_dir = PROCESSED_DIR,
+                                    height_step = 0.4, built = NULL) {
+  # built: see plot_niche_suitability_grid()'s matching parameter.
+  built <- built %||% .niche_score_rows_all_sites(sites, processed_dir, height_step)
+  rows <- built$rows
+  if (is.null(rows) || nrow(rows) == 0) {
+    message("Skipping niche height trees -- no sites had confirmed species")
+    return(invisible(NULL))
+  }
+
+  long_df <- rbind(
+    data.frame(site = rows$site, species = rows$species, height = rows$height,
+               score = rows$before, stage = "Before ceiling rescale"),
+    data.frame(site = rows$site, species = rows$species, height = rows$height,
+               score = rows$after, stage = "After ceiling rescale")
+  )
+  long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+
+  subtitle <- if (length(built$excluded) > 0) {
+    sprintf("Excluded (no confirmed species): %s", paste(built$excluded, collapse = ", "))
+  } else {
+    NULL
+  }
+
+  p <- ggplot(long_df, aes(x = site, y = height, fill = score)) +
+    geom_tile(width = 0.85) +
+    scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
+                         limits = c(0, 100), name = "Suitability\n(0-100)") +
+    facet_grid(species ~ stage) +
+    labs(x = NULL, y = "Height (m)", title = "Niche suitability by height — all sites",
+         subtitle = subtitle) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  out_path <- file.path(out_dir, "niche_height_trees_all_sites.png")
+  n_species <- length(unique(long_df$species))
+  ggsave(out_path, plot = p, width = 12, height = max(6, 2 + 1.1 * n_species), dpi = 300,
+        bg = "white", limitsize = FALSE)
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Internal live visualisation ───────────────────────────────────────────────
+
+.plot_live <- function(state, abundanceS, abundanceJ, abundanceA,
+                       totalS, totalJ, totalA, t, carCap, sleeptime = 0.2) {
+  stage_cols <- scico::scico(3, palette = "lipari", begin = 0.2, end = 0.8)
+  sp_cols <- .species_colors(state$n_species)  # shared_helpers.R
+  total <- totalS + totalJ + totalA
+  n_sp <- state$n_species
+  par(mfrow = c(1, n_sp + 1), mar = c(4, 4, 3, 2))
+  for (sp in 1:n_sp) {
+    ts_S <- sapply(1:t, function(i) sum(abundanceS[, , , i, sp]))
+    ts_J <- sapply(1:t, function(i) sum(abundanceJ[, , , i, sp]))
+    ts_A <- sapply(1:t, function(i) sum(abundanceA[, , , i, sp]))
+    ts_total <- ts_S + ts_J + ts_A
+    plot(ts_total,
+      type = "b", col = sp_cols[sp], lwd = 2,
+      ylim = c(0, max(ts_total, 1)), xlab = "Year", ylab = "Abundance",
+      main = paste0(state$species_ids[sp], " (t=", t, ")"), las = 1
+    )
+    lines(ts_S, type = "b", col = stage_cols[1], pch = 16, lty = 2)
+    lines(ts_J, type = "b", col = stage_cols[2], pch = 17, lty = 2)
+    lines(ts_A, type = "b", col = stage_cols[3], pch = 15, lty = 2)
+    legend("topleft",
+      legend = c("Total", "S", "J", "A"),
+      col = c(sp_cols[sp], stage_cols), lty = c(1, 2, 2, 2),
+      pch = c(NA, 16, 17, 15), cex = 0.6
+    )
+  }
+  plot(total[1:t],
+    type = "b", col = "black", lwd = 2,
+    ylim = c(0, max(total, 1)), xlab = "Year", ylab = "Abundance",
+    main = paste0("All species (t=", t, ")"), las = 1
+  )
+  lines(totalS[1:t], type = "b", col = stage_cols[1], pch = 16)
+  lines(totalJ[1:t], type = "b", col = stage_cols[2], pch = 17)
+  lines(totalA[1:t], type = "b", col = stage_cols[3], pch = 15)
+  abline(h = carCap * state$xDim * state$yDim * state$zDim, col = "red", lty = 2)
+  legend("topleft",
+    legend = c("Total", "S", "J", "A"),
+    col = c("black", stage_cols), lty = 1, pch = c(NA, 16, 17, 15), cex = 0.6
+  )
+  dev.flush()
+  Sys.sleep(sleeptime)
+}
+
+# ── Post-hoc abundance plot ───────────────────────────────────────────────────
+
+plot_abundance <- function(result, t = NULL, species_specific = TRUE) {
+  state <- result$state
+  t_max <- if (is.null(t)) length(result$totalabundanceA) else t
+  stage_cols <- scico::scico(3, palette = "lipari", begin = 0.2, end = 0.8)
+  sp_cols <- .species_colors(state$n_species)  # shared_helpers.R
+  totalS <- result$totalabundanceS
+  totalJ <- result$totalabundanceJ
+  totalA <- result$totalabundanceA
+  total <- totalS + totalJ + totalA
+  n_panels <- if (species_specific) state$n_species + 1L else 1L
+  par(mfrow = c(1, n_panels), mar = c(4, 4, 3, 2))
+  if (species_specific) {
+    for (sp in 1:state$n_species) {
+      ts_S <- sapply(1:t_max, function(i) sum(result$abundanceS[, , , i, sp]))
+      ts_J <- sapply(1:t_max, function(i) sum(result$abundanceJ[, , , i, sp]))
+      ts_A <- sapply(1:t_max, function(i) sum(result$abundanceA[, , , i, sp]))
+      ts_total <- ts_S + ts_J + ts_A
+      plot(ts_total,
+        type = "b", col = sp_cols[sp], lwd = 2,
+        ylim = c(0, max(ts_total, 1)), xlab = "Year", ylab = "Abundance",
+        main = paste0(state$species_ids[sp], " (t=", t_max, ")"), las = 1
+      )
+      lines(ts_S, type = "b", col = stage_cols[1], pch = 16, lty = 2)
+      lines(ts_J, type = "b", col = stage_cols[2], pch = 17, lty = 2)
+      lines(ts_A, type = "b", col = stage_cols[3], pch = 15, lty = 2)
+      legend("topleft",
+        legend = c("Total", "S", "J", "A"),
+        col = c(sp_cols[sp], stage_cols), lty = c(1, 2, 2, 2),
+        pch = c(NA, 16, 17, 15), cex = 0.6
+      )
+    }
+  }
+  plot(total[1:t_max],
+    type = "b", col = "black", lwd = 2,
+    ylim = c(0, max(total[1:t_max], 1)), xlab = "Year", ylab = "Abundance",
+    main = paste0(state$site_name, " — All species (t=", t_max, ")"), las = 1
+  )
+  lines(totalS[1:t_max], type = "b", col = stage_cols[1], pch = 16)
+  lines(totalJ[1:t_max], type = "b", col = stage_cols[2], pch = 17)
+  lines(totalA[1:t_max], type = "b", col = stage_cols[3], pch = 15)
+  abline(h = state$carCap * state$xDim * state$yDim * state$zDim, col = "red", lty = 2)
+  legend("topleft",
+    legend = c("Total", "S", "J", "A"),
+    col = c("black", stage_cols), lty = 1, pch = c(NA, 16, 17, 15), cex = 0.6
+  )
+}
+
+# ggplot version of plot_abundance()'s per-species-per-stage breakdown
+# (2026-08-24) -- reuses the exact same summing logic
+# (sum(result$abundanceS[,,,i,sp]) per timestep/species, see plot_abundance()
+# above) but as a proper multi-replicate ggplot figure instead of a base-R
+# device plot, so it can show replicate spread the same way
+# plot_experiment() (get_colonization.R) already does for OAT sweeps: thin
+# per-replicate lines at low alpha, thick mean line on top. Reads its own
+# input file (house convention -- every plotting function in this file loads
+# what it needs rather than taking an already-loaded object), same
+# result$runs/list(result) fallback plot_default_colonization_run() already
+# uses for an RDS saved before run_replicated() existed.
+plot_species_stage_curves <- function(site_name, exp_tag = "best_combo",
+                                      out_dir = OUTPUT_DIR,
+                                      processed_dir = PROCESSED_DIR) {
+  in_path <- file.path(processed_dir, sprintf("colonization_%s_%s_h0.40.rds", site_name, exp_tag))
+  if (!file.exists(in_path)) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- no results at ", in_path)
+    return(invisible(NULL))
+  }
+  result <- readRDS(in_path)
+  if (is.data.frame(result)) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- sweep result, has no per-species abundanceS/J/A arrays")
+    return(invisible(NULL))
+  }
+  runs <- if (is.list(result) && !is.null(result$runs)) result$runs else list(result)
+  runs <- Filter(Negate(is.null), runs)
+  if (length(runs) == 0) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- no successful replicates")
+    return(invisible(NULL))
+  }
+
+  # 2026-08-25: fixed a real crash ("subscript out of bounds") -- different
+  # replicates of the SAME site+params run can have DIFFERENT species_ids/
+  # n_species (confirmed on Mashpi's best_combo run: 10/8/9 species across
+  # 3 reps). A species with very few observations apparently can drop out
+  # of a replicate's modeled set depending on that replicate's random
+  # train/val split (runcolonization()'s per-species niche availability
+  # check). Assuming every replicate shares rep 1's species_ids/n_species
+  # (indexing every run's abundanceS[,,,i,sp] the same way) breaks the
+  # moment a later replicate has fewer species than rep 1. Fixed by looking
+  # up each replicate's OWN species_ids by NAME, skipping a species
+  # entirely for whichever replicate(s) didn't model it, rather than
+  # assuming a shared, fixed species list/index across replicates.
+  all_species <- sort(unique(unlist(lapply(runs, function(r) r$species_ids))))
+  sp_cols <- .species_colors(length(all_species))  # shared_helpers.R
+  names(sp_cols) <- all_species
+
+  long_df <- do.call(rbind, lapply(seq_along(runs), function(rep_i) {
+    run <- runs[[rep_i]]
+    t_max <- length(run$totalabundanceA)
+    do.call(rbind, lapply(seq_along(run$species_ids), function(sp) {
+      ts_S <- sapply(1:t_max, function(i) sum(run$abundanceS[, , , i, sp]))
+      ts_J <- sapply(1:t_max, function(i) sum(run$abundanceJ[, , , i, sp]))
+      ts_A <- sapply(1:t_max, function(i) sum(run$abundanceA[, , , i, sp]))
+      rbind(
+        data.frame(rep = rep_i, species = run$species_ids[sp], stage = "Seedling (S)", t = 1:t_max, abundance = ts_S),
+        data.frame(rep = rep_i, species = run$species_ids[sp], stage = "Juvenile (J)", t = 1:t_max, abundance = ts_J),
+        data.frame(rep = rep_i, species = run$species_ids[sp], stage = "Adult (A)",    t = 1:t_max, abundance = ts_A)
+      )
+    }))
+  }))
+  long_df$stage <- factor(long_df$stage, levels = c("Seedling (S)", "Juvenile (J)", "Adult (A)"))
+
+  mean_df <- aggregate(abundance ~ species + stage + t, data = long_df, FUN = mean)
+
+  p <- ggplot(long_df, aes(x = t, y = abundance, colour = species)) +
+    geom_line(aes(group = interaction(species, rep)), alpha = 0.25, linewidth = 0.4) +
+    geom_line(data = mean_df, linewidth = 1.0) +
+    scale_colour_manual(values = sp_cols, name = "Species") +
+    facet_wrap(~stage, nrow = 1, scales = "free_y") +
+    labs(x = "Year", y = "Abundance",
+         title = sprintf("Per-species abundance by life stage — %s", site_name),
+         subtitle = sprintf("%s (%d replicate%s); thick = mean, thin = individual replicates",
+                            exp_tag, length(runs), if (length(runs) > 1) "s" else "")) +
+    theme_minimal(base_size = 11)
+
+  out_path <- file.path(out_dir, sprintf("species_stage_curves_%s_%s.png", site_name, exp_tag))
+  ggsave(out_path, plot = p, width = 14, height = 5.5, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# Same per-species/per-stage summing logic as plot_species_stage_curves()
+# above, but for ONE species across MULTIPLE sites' best_combo runs --
+# color = site instead of species, so it directly compares how the same
+# taxon fares under each site's own best-performing parameter combo and
+# landscape. 2026-08-25. `sites` defaults to .confirmed_species_sites()
+# (shared_helpers.R) filtered to sites with an actual best_combo result on
+# disk -- see that helper's header for why it checks the raw Identification
+# column rather than FinalID (blank IDs default to "Maxillaria acutifolia").
+plot_species_across_sites <- function(species_name, sites = NULL, exp_tag = "best_combo",
+                                      out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR) {
+  requested_sites <- sites %||% .confirmed_species_sites(species_name)
+  have_data <- vapply(requested_sites, function(s)
+    file.exists(file.path(processed_dir, sprintf("colonization_%s_%s_h0.40.rds", s, exp_tag))),
+    logical(1))
+  excluded <- requested_sites[!have_data]
+  use_sites <- requested_sites[have_data]
+  if (length(use_sites) < 2) {
+    message("Skipping ", species_name, " -- fewer than 2 sites with a ", exp_tag,
+            " result available (requested: ", paste(requested_sites, collapse = ", "), ")")
+    return(invisible(NULL))
+  }
+
+  long_df <- do.call(rbind, lapply(use_sites, function(site_name) {
+    in_path <- file.path(processed_dir, sprintf("colonization_%s_%s_h0.40.rds", site_name, exp_tag))
+    result  <- readRDS(in_path)
+    runs <- if (is.list(result) && !is.null(result$runs)) result$runs else list(result)
+    runs <- Filter(Negate(is.null), runs)
+    if (length(runs) == 0) {
+      message("Skipping ", site_name, " for ", species_name, " -- no successful replicates")
+      return(NULL)
+    }
+    # 2026-08-25: same per-replicate species_ids fix as
+    # plot_species_stage_curves() -- a species can be present in some of a
+    # site's replicates and absent from others (see that function's header
+    # note), so `sp` must be looked up fresh per replicate rather than once
+    # from runs[[1]]$state, and a replicate lacking the species contributes
+    # no rows instead of indexing the wrong column or crashing.
+    rows_per_rep <- lapply(seq_along(runs), function(rep_i) {
+      run <- runs[[rep_i]]
+      sp <- match(species_name, run$species_ids)
+      if (is.na(sp)) {
+        return(NULL)
+      }
+      t_max <- length(run$totalabundanceA)
+      ts_S <- sapply(1:t_max, function(i) sum(run$abundanceS[, , , i, sp]))
+      ts_J <- sapply(1:t_max, function(i) sum(run$abundanceJ[, , , i, sp]))
+      ts_A <- sapply(1:t_max, function(i) sum(run$abundanceA[, , , i, sp]))
+      rbind(
+        data.frame(site = site_name, rep = rep_i, stage = "Seedling (S)", t = 1:t_max, abundance = ts_S),
+        data.frame(site = site_name, rep = rep_i, stage = "Juvenile (J)", t = 1:t_max, abundance = ts_J),
+        data.frame(site = site_name, rep = rep_i, stage = "Adult (A)",    t = 1:t_max, abundance = ts_A)
+      )
+    })
+    rows_per_rep <- Filter(Negate(is.null), rows_per_rep)
+    if (length(rows_per_rep) == 0) {
+      message("Skipping ", site_name, " for ", species_name,
+              " -- not modeled in any replicate (", paste(runs[[1]]$species_ids, collapse = ", "), ")")
+      return(NULL)
+    }
+    do.call(rbind, rows_per_rep)
+  }))
+  if (is.null(long_df) || length(unique(long_df$site)) < 2) {
+    message("Skipping ", species_name, " -- fewer than 2 sites actually modeled this species")
+    return(invisible(NULL))
+  }
+  long_df$stage <- factor(long_df$stage, levels = c("Seedling (S)", "Juvenile (J)", "Adult (A)"))
+
+  site_names <- sort(unique(long_df$site))
+  site_cols  <- setNames(.species_colors(length(site_names)), site_names)  # shared_helpers.R
+
+  mean_df <- aggregate(abundance ~ site + stage + t, data = long_df, FUN = mean)
+
+  excluded_note <- if (length(excluded) > 0)
+    sprintf(" | Excluded: %s (no %s result, or unconfirmed ID -- see .confirmed_species_sites())",
+            paste(excluded, collapse = ", "), exp_tag)
+  else ""
+
+  p <- ggplot(long_df, aes(x = t, y = abundance, colour = site)) +
+    geom_line(aes(group = interaction(site, rep)), alpha = 0.25, linewidth = 0.4) +
+    geom_line(data = mean_df, linewidth = 1.0) +
+    scale_colour_manual(values = site_cols, name = "Site") +
+    facet_wrap(~stage, nrow = 1, scales = "free_y") +
+    labs(x = "Year", y = "Abundance",
+         title = species_name,
+         subtitle = sprintf("Compared across: %s%s", paste(use_sites, collapse = ", "), excluded_note)) +
+    theme_minimal(base_size = 11) +
+    theme(plot.title = element_text(face = "italic"))
+
+  slug <- gsub("[^A-Za-z0-9]+", "_", species_name)
+  out_path <- file.path(out_dir, sprintf("species_across_sites_%s.png", slug))
+  ggsave(out_path, plot = p, width = 14, height = 5.5, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── 3D post-hoc visualisation ─────────────────────────────────────────────────
+
+# Translucent point-cloud underlay shared by plot_3d_abundance() and
+# plot_3d_abundance_animated(): state$landscape is the full boolean canopy-
+# occupancy array already computed for the run, reused here purely as a
+# visual backdrop so abundance markers read as embedded in the canopy rather
+# than floating in empty space. Subsampled (default cap 20,000 voxels) --
+# this is a shape cue, not a faithful full-resolution render, and plotly gets
+# slow/heavy (especially the animated HTML export) well before every valid
+# voxel is actually needed to convey "there is canopy here."
+.canopy_context_trace <- function(state, max_points = 20000, seed = 1) {
+  idx <- which(state$landscape, arr.ind = TRUE)
+  if (nrow(idx) == 0) {
+    return(NULL)
+  }
+  if (nrow(idx) > max_points) {
+    set.seed(seed)
+    idx <- idx[sample.int(nrow(idx), max_points), , drop = FALSE]
+  }
+  data.frame(x = idx[, 1], y = idx[, 2], z = idx[, 3])
+}
+
+plot_3d_abundance <- function(result, t = NULL, show_canopy = TRUE,
+                              canopy_opacity = 0.05, canopy_max_points = 20000) {
+  state <- result$state
+  if (is.null(t)) t <- dim(result$abundanceA)[4]
+  sp_cols <- .species_colors(state$n_species)  # shared_helpers.R
+  rows <- list()
+  for (sp in 1:state$n_species) {
+    sp_name <- state$species_ids[sp]
+    col <- sp_cols[sp]
+    for (stg in list(
+      list(arr = result$abundanceS, nm = "S", sym = "circle"),
+      list(arr = result$abundanceJ, nm = "J", sym = "diamond"),
+      list(arr = result$abundanceA, nm = "A", sym = "square")
+    )) {
+      idx <- which(stg$arr[, , , t, sp] > 0, arr.ind = TRUE)
+      if (nrow(idx) > 0) {
+        rows[[length(rows) + 1]] <- data.frame(
+          x = idx[, 1], y = idx[, 2], z = idx[, 3],
+          species = sp_name, stage = stg$nm, color = col, symbol = stg$sym,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (length(rows) == 0) {
+    message("No individuals to plot at t=", t)
+    return(invisible(NULL))
+  }
+  df <- do.call(rbind, rows)
+  traces <- split(df, paste0(df$species, "_", df$stage))
+  fig <- plotly::plot_ly()
+  if (show_canopy) {
+    canopy_df <- .canopy_context_trace(state, max_points = canopy_max_points)
+    if (!is.null(canopy_df)) {
+      fig <- plotly::add_trace(fig,
+        data = canopy_df, x = ~x, y = ~y, z = ~z,
+        type = "scatter3d", mode = "markers",
+        name = "Canopy", showlegend = TRUE,
+        marker = list(
+          color = "#6b4423", size = 2,
+          opacity = canopy_opacity
+        )
+      )
+    }
+  }
+  for (tr in traces) {
+    fig <- plotly::add_trace(fig,
+      data = tr, x = ~x, y = ~y, z = ~z,
+      type = "scatter3d", mode = "markers",
+      name = paste0(tr$species[1], " ", tr$stage[1]),
+      marker = list(
+        symbol = tr$symbol[1], color = tr$color[1],
+        size = 6, opacity = 0.85
+      )
+    )
+  }
+  fig <- plotly::layout(fig,
+    title = paste0("Abundance (t=", t, ")"),
+    scene = list(
+      xaxis = list(title = "x"), yaxis = list(title = "y"),
+      zaxis = list(title = "height tier")
+    )
+  )
+  print(fig)
+  invisible(fig)
+}
+
+# Same idea as plot_3d_abundance() but across every timestep, using plotly's
+# built-in frame/animation support (play button + slider) instead of a
+# single static scatter. Saved as a self-contained HTML if out_path is
+# given. Not yet run against real output — verify once you have a result
+# worth animating (e.g. from a best_case replicate that actually persists).
+# The canopy-context trace (show_canopy=TRUE default, added 2026-07-24) in
+# particular needs a visual check: mixing an unframed static trace with a
+# framed animated one in the same figure is standard plotly behavior, but
+# wasn't exercised against a real result in this session -- open the saved
+# HTML once and confirm the canopy points stay put while the slider moves.
+plot_3d_abundance_animated <- function(result, out_path = NULL, show_canopy = TRUE,
+                                       canopy_opacity = 0.05, canopy_max_points = 20000) {
+  state <- result$state
+  n_t <- dim(result$abundanceA)[4]
+  sp_cols <- .species_colors(state$n_species)  # shared_helpers.R
+
+  rows <- list()
+  for (t in seq_len(n_t)) {
+    for (sp in seq_len(state$n_species)) {
+      sp_name <- state$species_ids[sp]
+      col <- sp_cols[sp]
+      for (stg in list(
+        list(arr = result$abundanceS, nm = "S", sym = "circle"),
+        list(arr = result$abundanceJ, nm = "J", sym = "diamond"),
+        list(arr = result$abundanceA, nm = "A", sym = "square")
+      )) {
+        idx <- which(stg$arr[, , , t, sp] > 0, arr.ind = TRUE)
+        if (nrow(idx) > 0) {
+          rows[[length(rows) + 1]] <- data.frame(
+            x = idx[, 1], y = idx[, 2], z = idx[, 3], t = t,
+            species = sp_name, stage = stg$nm, color = col,
+            symbol = stg$sym, trace = paste0(sp_name, " ", stg$nm),
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }
+  if (length(rows) == 0) {
+    message("No individuals to plot across any timestep")
+    return(invisible(NULL))
+  }
+  df <- do.call(rbind, rows)
+
+  # trace -> color lookup (one row per unique trace, in matching order —
+  # safer than pairing two independently-deduplicated vectors)
+  trace_lu <- df[!duplicated(df$trace), c("trace", "color")]
+  colors_named <- setNames(trace_lu$color, trace_lu$trace)
+
+  # Canopy trace is added first, with no `frame` mapping, so it renders as a
+  # static backdrop that persists unchanged across every animation frame
+  # (plotly supports mixing framed and unframed traces in one figure) --
+  # only the abundance trace below actually animates by year.
+  fig <- plotly::plot_ly()
+  if (show_canopy) {
+    canopy_df <- .canopy_context_trace(state, max_points = canopy_max_points)
+    if (!is.null(canopy_df)) {
+      fig <- plotly::add_trace(fig,
+        data = canopy_df, x = ~x, y = ~y, z = ~z,
+        type = "scatter3d", mode = "markers",
+        name = "Canopy", showlegend = TRUE,
+        marker = list(
+          color = "#6b4423", size = 2,
+          opacity = canopy_opacity
+        )
+      )
+    }
+  }
+  fig <- plotly::add_trace(
+    fig,
+    data = df, x = ~x, y = ~y, z = ~z, frame = ~t, color = ~trace,
+    colors = colors_named,
+    symbol = ~symbol, symbols = c(circle = "circle", diamond = "diamond", square = "square"),
+    type = "scatter3d", mode = "markers",
+    marker = list(size = 6, opacity = 0.85)
+  )
+  fig <- fig |>
+    plotly::layout(
+      title = "Abundance over time",
+      scene = list(
+        xaxis = list(title = "x"), yaxis = list(title = "y"),
+        zaxis = list(title = "height tier")
+      )
+    ) |>
+    plotly::animation_opts(frame = 400, transition = 200, redraw = TRUE) |>
+    plotly::animation_slider(currentvalue = list(prefix = "Year: "))
+
+  if (!is.null(out_path)) {
+    # selfcontained=TRUE needs pandoc (not installed on the cluster); FALSE
+    # writes a small "<name>_files/" dependency folder alongside the HTML
+    # instead -- keep the two together when copying/viewing elsewhere.
+    htmlwidgets::saveWidget(fig, out_path, selfcontained = FALSE)
+    message("Saved: ", out_path)
+  }
+  invisible(fig)
 }
 
 # ── Single default colonization run (no swept parameter) ───────────────────────

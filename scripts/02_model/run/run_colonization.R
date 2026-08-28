@@ -12,10 +12,11 @@
 #   experiment_tag Label appended to output file names for identification
 #                  Default: "default"
 #   height_step    Microenv height-tier spacing to run at (must already exist —
-#                  see height_res_array.sh). Default: 0.25 (production
-#                  resolution — validated against 0.1m by
+#                  see height_res_array.sh). Default: 0.4 (production
+#                  resolution as of 2026-08-17 -- was 0.25, raised for
+#                  runtime; validated against 0.1m by
 #                  height_resolution_experiment.R, no significant outcome
-#                  difference, ~2x cheaper). Appended to the output filename
+#                  difference). Appended to the output filename
 #                  and log name whenever it isn't 0.1m, so runs at different
 #                  resolutions never silently overwrite each other.
 #   species_file   Path to an RDS file containing a character vector of
@@ -46,6 +47,7 @@ library(ggplot2)
 library(patchwork)
 library(parallel)
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")
 source("scripts/02_model/engine/get_colonization.R")
 # plot_abundance()/plot_3d_abundance() (used in the interactive plotting
 # section below) live in plot_functions.R, not get_colonization.R.
@@ -56,7 +58,7 @@ args         <- commandArgs(trailingOnly = TRUE)
 site_name    <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipucuna"
 params_file  <- if (length(args) >= 2 && nzchar(args[2])) args[2] else NULL
 exp_tag      <- if (length(args) >= 3 && nzchar(args[3])) args[3] else "default"
-height_step  <- if (length(args) >= 4 && nzchar(args[4])) as.numeric(args[4]) else 0.25
+height_step  <- if (length(args) >= 4 && nzchar(args[4])) as.numeric(args[4]) else 0.4
 species_file <- if (length(args) >= 5 && nzchar(args[5])) args[5] else NULL
 manifest_suffix <- if (height_step != 0.1) sprintf("_h%.2f", height_step) else ""
 
@@ -100,8 +102,33 @@ log_msg(sprintf("Observations for %s: %d across %d species", site_name,
   length(unique(niches$FinalID[niches$Area_or_Site == site_name]))))
 
 # ── 3. Canopy grid (fallback) ─────────────────────────────────────────────────
+# 2026-08-23: fixed a real bug found via the full sweep -- LaElenita,
+# MindoMirador, Saloya, and Yanayacu have ZERO observations with a measured
+# CanopyHeight_m, so mean(..., na.rm=TRUE) on an all-NA vector silently gave
+# NaN here, unguarded. canopy_grid itself turns out to be dead in that case
+# (only read when forestparams=NULL, see runcolonization()/init_colonization()
+# in get_colonization.R -- this script always sets forestparams below), but
+# params$canopy_z <- mean_canopy (next section) is NOT dead: it feeds
+# disperse()'s dispersal-kernel exponent directly, every time a seed is
+# actually dispersed. NaN there propagates into disperse()'s target
+# coordinates, turning ok's bounds-check into all-NA and crashing on
+# `if (any(ok))` ("missing value where TRUE/FALSE needed") the moment a
+# seed is produced -- silent until then, since seed production is rare by
+# design. Confirmed this affects 4/7 sites, all 8 experiments each.
+# Fallback mirrors run_microclimate_site.R's own precedent for the exact
+# same missing-data case (falls back to the canopy-height ceiling used to
+# generate this site's microenv, i.e. p99 of vhgt.tif when unmeasured --
+# see that script's "No measured CanopyHeight_m -- using p99 of vhgt.tif"
+# log line) -- max(available_heights) recovers that same ceiling directly
+# from data already loaded here, no raster re-read needed.
 mean_canopy <- mean(niches$CanopyHeight_m[niches$Area_or_Site == site_name],
                     na.rm = TRUE)
+if (!is.finite(mean_canopy)) {
+  mean_canopy <- max(available_heights)
+  log_msg(sprintf(
+    "No observations with measured CanopyHeight_m for %s -- falling back to this site's microenv canopy ceiling (%.1f m).",
+    site_name, mean_canopy))
+}
 log_msg(sprintf("Mean canopy height: %.1f m", mean_canopy))
 canopy_grid <- matrix(mean_canopy, nrow = 50, ncol = 50)  # used only if forestparams=NULL
 
@@ -114,16 +141,7 @@ site <- list(Site = site_name)
 #   stem density = 272–324 trees/ha (≥10 cm dsh) → stems_per_ha = 298
 # Crown geometry from pantropical allometry (Williams et al. 2019 review).
 # Epiphyte footprint: ~4×5 cm pseudobulb cluster = 0.02 m² (field estimate).
-forestparams <- list(
-  stems_per_ha          = 298,    # Myster (2017) Table 5, mean of 4 primary MR plots
-  mean_hgt              = 8.4,    # m — mean canopy height at this elevation
-  sd_hgt                = 3.5,
-  mean_crown_r          = 2.0,    # m — crown radius
-  sd_crown_r            = 0.8,
-  trunk_r               = 0.114,  # m — mean dsh 22.7 cm / 2 (Myster 2017)
-  branch_density        = 3.0,    # m² branch surface per m² projected crown area
-  epiphyte_footprint_m2 = 0.02    # m² bark area per Maxillariinae individual
-)
+forestparams <- default_forestparams()  # shared_helpers.R
 
 # ── 5. Parameters ─────────────────────────────────────────────────────────────
 # If a params file was passed, load it — otherwise use literature defaults.
