@@ -2,9 +2,10 @@
 # batch_exp.sh — submit one sensitivity-experiment job per site to the Marvin cluster
 # Each job sweeps one parameter (5 values, handled inside run_colonization.R)
 # across all timesteps for one site. SITES x EXP jobs total -- SITES is
-# derived from the observations CSV (currently 7), EXP has 8 entries below
-# (7 one-at-a-time sweeps + reproduction_factorial_v3), so 56 jobs as of
-# 2026-08-23.
+# derived from the observations CSV, minus Saloya (dropped 2026-08-28, see
+# below -- slowest site, not worth the wall-clock budget with under a month
+# left), currently 6. EXP has 8 entries below (7 one-at-a-time sweeps +
+# reproduction_factorial_v3), so 48 jobs as of 2026-08-28.
 #
 # RECOMMENDED ORDER: run founder_number for one site alone first (e.g.
 #   sbatch scripts/02_model/run/run_colonization.sh Maquipucuna "$(pwd)/data/params/n_founders.rds" founder_number
@@ -46,6 +47,16 @@ Rscript scripts/02_model/setup/make_params.R
 CANOPY_OBS_CSV="${CANOPY_OBS_CSV:-data/csv/combined_with_identification.csv}"
 export CANOPY_OBS_CSV
 mapfile -t SITES < <(awk -F, 'NR>1 && $2!="" {print $2}' "$CANOPY_OBS_CSV" | sort -u)
+
+# 2026-08-28: Saloya dropped from production (v4/v5/v6 onward) -- tallest
+# canopy of every site (125 height tiers) makes its climate-cache build the
+# slowest by a wide margin (its factorial + OAT-chain sweep was still
+# running after 2+ days on vlm_long when this was added), and with under a
+# month left it's not worth the wall-clock budget. SITES is still derived
+# from the observations CSV above (so a real new site is still picked up
+# automatically) -- this just filters the one known slow outlier back out.
+SITES=("${SITES[@]/Saloya}")
+SITES=($(printf '%s\n' "${SITES[@]}" | grep -v '^$'))
 
 # EXP and PARAMS are paired by index — PARAMS[k] is the RDS make_params.R
 # built for the experiment EXP[k]. Keep these two arrays in sync.
