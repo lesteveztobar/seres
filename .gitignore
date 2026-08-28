@@ -16,6 +16,19 @@ figures/*
 *.log
 *.tmp
 logs/*.out
+logs/*.err
+logs/*.jobs
+logs/*.txt
+logs/older_than_1_week/
+scripts/03_orchestration/logs/
+scripts/tests/test_log/
+scripts/tests/test_results/
+
+# --- Build artifacts ---
+Rplots.pdf
+formulas.aux
+formulas.pdf
+*.aux
 
 # --- Credentials file ---
 credentials.rds
