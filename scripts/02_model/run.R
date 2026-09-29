@@ -12,7 +12,7 @@
 # headers and can't be dispatched from here), see run.sh in this directory.
 #
 # Usage: Rscript scripts/02_model/run.R <subcommand> [args...]
-# Run from: /home/s38leste_hpc/canopymicroenv/
+# Run from: /home/s38leste_hpc/seres/
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 HERE <- "scripts/02_model"
@@ -38,7 +38,7 @@ usage <- function() {
     "Analysis / diagnostics (read-only unless noted):\n",
     "  climate-variation               Vertical/elevational climate variation tests\n",
     "                                  (climate_variation_test.R). No args.\n",
-    "  competition [BASELINE_TAG=realistic_273founders]\n",
+    "  competition [BASELINE_TAG=realistic]\n",
     "                                  Isolation-vs-multi-species comparison (competition_analysis.R).\n",
     "  summarize                       Summarize all results so far (summarize_all_results.R). No args.\n",
     "  check-niche [SITE] [EXTRA_SPECIES] [HEIGHT_STEP]\n",
@@ -61,21 +61,23 @@ rest <- if (length(all_args) >= 2) all_args[-1] else character(0)
 commandArgs <- function(...) rest  # nolint: shadows base::commandArgs on purpose
 
 script <- switch(cmd,
-  params               = "setup/make_params.R",
-  "isolation-files"     = "setup/make_isolation_species_files.R",
-  niches                = "setup/characterize_niches.R",
-  onesite                = "run/run_colonization.R",
-  "resolution-diagnostics" = "resolution/resolution_diagnostics.R",
-  "resolution-experiment"  = "resolution/height_resolution_experiment.R",
-  "climate-variation"    = "analysis/climate_variation_test.R",
-  competition            = "analysis/competition_analysis.R",
-  summarize               = "analysis/summarize_all_results.R",
+  params               = "diagnostics/make_params.R",
+  "isolation-files"     = "experiments/A10_competition_isolation/make_isolation_species_files.R",
+  niches                = "experiments/A02_niche_characterization/characterize_niches.R",
+  onesite                = "02_model/run/run_colonization.R",
+  "resolution-diagnostics" = "experiments/A11_height_resolution/resolution_diagnostics.R",
+  "resolution-experiment"  = "experiments/A11_height_resolution/height_resolution_experiment.R",
+  "climate-variation"    = "experiments/A08_climate_variation_between_sites/climate_variation_test.R",
+  competition            = "experiments/A10_competition_isolation/competition_analysis.R",
+  summarize               = "experiments/A19_results_manifest_build/summarize_all_results.R",
   "check-niche"          = "diagnostics/check_niche_suitability.R",
   "check-transitions"    = "diagnostics/check_transition_rates.R",
   "check-run"             = "diagnostics/check_colonization_run.R",
-  plots                   = "plots/plot_all.R",
+  plots                   = "02_model/plots/plot_all.R",
   NULL
 )
 
 if (is.null(script)) { usage(); quit(status = 1) }
-source(file.path(HERE, script))
+# Paths above are relative to scripts/ (sub-scripts live in 02_model/,
+# diagnostics/ and experiments/ since the 2026-09-29 reorg).
+source(file.path(dirname(HERE), script))

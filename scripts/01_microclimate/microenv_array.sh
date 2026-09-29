@@ -5,7 +5,7 @@
 #   e.g. sbatch microenv_array.sh 12 0.5 Maquipucuna            # one site only
 #        (this is what run_microclimate.sh's `submit-site` uses)
 #   e.g. sbatch microenv_array.sh 12 0.25 "" Maquipucuna        # all sites except one
-# Run from: /home/s38leste_hpc/canopymicroenv/
+# Run from: /home/s38leste_hpc/seres/
 #
 # 2026-08-04: rewritten to chain sites sequentially via --dependency=afterok
 # instead of submitting every site's height-loop job simultaneously.
@@ -30,7 +30,7 @@
 #SBATCH --account=ag_biob_scabral
 #SBATCH --time=00:05:00
 #SBATCH --ntasks=1
-#SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_array_%j.out
+#SBATCH --output=/home/s38leste_hpc/seres/logs/log_array_%j.out
 
 SITES=("Maquipucuna" "Mashpi" "MindoTarabita" "LaElenita" "MindoMirador" "Saloya" "Yanayacu")
 N_MONTHS=${1:-12}
@@ -106,7 +106,7 @@ export CANOPY_PYTHON="/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python"
 SITE=$1
 N_MONTHS=${2:-12}
 HEIGHT_STEP=${3:-0.1}
-export CANOPY_SCRATCH=$(ws_allocate canopymicroenv 90)
+export CANOPY_SCRATCH=$(ws_allocate seres 90)
 echo "Scratch workspace: $CANOPY_SCRATCH"
 # 2026-08-10: node-local /tmp filled up during Maquipucuna's first
 # production run (terra's wrap/unwrap/resample/mask scratch rasters,
@@ -117,7 +117,7 @@ echo "Scratch workspace: $CANOPY_SCRATCH"
 # larger Lustre scratch workspace instead.
 mkdir -p "$CANOPY_SCRATCH/tmp"
 export TMPDIR="$CANOPY_SCRATCH/tmp"
-cd /home/$USER/canopymicroenv
+cd /home/$USER/seres
 $CANOPY_PYTHON -c "import ee; print('ee import OK')" 2>&1
 Rscript scripts/01_microclimate/run_microclimate_site.R "$SITE" "$N_MONTHS" "$HEIGHT_STEP"
 EOS

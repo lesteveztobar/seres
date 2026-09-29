@@ -72,7 +72,13 @@ log_msg <- make_log_msg(log_file = log_file)
 log_msg("run_colonization.R started")
 
 # ── 1. Load microenvironment ──────────────────────────────────────────────────
-microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site_name, manifest_suffix))
+# CANOPY_MICROENV_OVERRIDE (v7, Phase B4 equivalence test only): read a
+# specific manifest file instead of the default site/height_step path --
+# lets the equivalence test point at the archived pre-v7pix manifest for
+# the "old input" arm without touching the production file layout. Unset
+# in every normal run; default behavior is unchanged.
+microenv_path <- Sys.getenv("CANOPY_MICROENV_OVERRIDE",
+  unset = file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site_name, manifest_suffix)))
 if (!file.exists(microenv_path)) {
   stop(sprintf("No microenv at %s (height_step=%.2f) — run height_res_array.sh %s first.",
               microenv_path, height_step, site_name))
@@ -101,14 +107,14 @@ log_msg(sprintf("Observations for %s: %d across %d species", site_name,
   sum(niches$Area_or_Site == site_name),
   length(unique(niches$FinalID[niches$Area_or_Site == site_name]))))
 
-# ── 3. Canopy grid (fallback) ─────────────────────────────────────────────────
+# ── 3. Canopy ceiling (fallback grid + dispersal wind-decay reference) ────────
 # 2026-08-23: fixed a real bug found via the full sweep -- LaElenita,
 # MindoMirador, Saloya, and Yanayacu have ZERO observations with a measured
 # CanopyHeight_m, so mean(..., na.rm=TRUE) on an all-NA vector silently gave
 # NaN here, unguarded. canopy_grid itself turns out to be dead in that case
 # (only read when forestparams=NULL, see runcolonization()/init_colonization()
 # in get_colonization.R -- this script always sets forestparams below), but
-# params$canopy_z <- mean_canopy (next section) is NOT dead: it feeds
+# params$canopy_z <- canopy_ceiling (next section) is NOT dead: it feeds
 # disperse()'s dispersal-kernel exponent directly, every time a seed is
 # actually dispersed. NaN there propagates into disperse()'s target
 # coordinates, turning ok's bounds-check into all-NA and crashing on
@@ -121,16 +127,38 @@ log_msg(sprintf("Observations for %s: %d across %d species", site_name,
 # see that script's "No measured CanopyHeight_m -- using p99 of vhgt.tif"
 # log line) -- max(available_heights) recovers that same ceiling directly
 # from data already loaded here, no raster re-read needed.
-mean_canopy <- mean(niches$CanopyHeight_m[niches$Area_or_Site == site_name],
-                    na.rm = TRUE)
-if (!is.finite(mean_canopy)) {
-  mean_canopy <- max(available_heights)
-  log_msg(sprintf(
-    "No observations with measured CanopyHeight_m for %s -- falling back to this site's microenv canopy ceiling (%.1f m).",
-    site_name, mean_canopy))
-}
-log_msg(sprintf("Mean canopy height: %.1f m", mean_canopy))
-canopy_grid <- matrix(mean_canopy, nrow = 50, ncol = 50)  # used only if forestparams=NULL
+#
+# 2026-09-02 (v7 rebuild, Phase 1.6): switched from MEAN to MAX measured
+# CanopyHeight_m, and moved to ONE shared implementation
+# (site_canopy_ceiling(), shared_helpers.R) instead of computing it inline
+# here -- this exact formula used to be independently duplicated in 9
+# places (this file plus 8 analysis scripts), which had already let MEAN
+# and MAX versions drift apart before this fix; see
+# docs/methods_update_report.md's Phase 0/0.2 trace for the full list. This
+# variable used to be called `mean_canopy` and be a genuinely different
+# definition of "canopy height" from zDim (the landscape's own height-tier
+# count, always MAX-based -- see run_microclimate_site.R's
+# `height_ceiling_m`/`heights <- seq(0.1, height_ceiling_m, by=HEIGHT_STEP)`).
+# The two ceilings now share one definition. `mean_hgt` for build_forest()'s
+# own within-forest height HETEROGENEITY (a genuinely different quantity --
+# the spread of individual tree heights within a stand, not the landscape's
+# tallest point) is computed separately, in site_forestparams()
+# (shared_helpers.R, Phase 1.4).
+if (!is.finite(max(available_heights))) stop("available_heights has no finite value -- cannot fall back for ", site_name)
+canopy_ceiling <- site_canopy_ceiling(site_name, niches, max(available_heights))
+log_msg(sprintf("Canopy ceiling (max): %.1f m", canopy_ceiling))
+# canopy_grid's flat-landscape-fallback use in init_colonization() (only
+# read when forestparams=NULL) IS dead in every current production run --
+# this script always passes forestparams (site_forestparams(), below)
+# explicitly. Kept (not deleted) so a caller that deliberately passes
+# forestparams=NULL still gets a sane fallback.
+# NOT fully dead, though: init_colonization() also reads
+# mean(canopy_grid, na.rm=TRUE) UNCONDITIONALLY to pick the height at which
+# the canopy-openness coefficient `a` (wind-decay exponent) is evaluated --
+# see get_colonization.R's mid_zi/difrac derivation. This value is already
+# the corrected MAX-based canopy_ceiling (Phase 1.6), so that consumer
+# picks up the fix automatically.
+canopy_grid <- matrix(canopy_ceiling, nrow = 50, ncol = 50)
 
 # ── 4. Site object ────────────────────────────────────────────────────────────
 site <- list(Site = site_name)
@@ -141,7 +169,7 @@ site <- list(Site = site_name)
 #   stem density = 272–324 trees/ha (≥10 cm dsh) → stems_per_ha = 298
 # Crown geometry from pantropical allometry (Williams et al. 2019 review).
 # Epiphyte footprint: ~4×5 cm pseudobulb cluster = 0.02 m² (field estimate).
-forestparams <- default_forestparams()  # shared_helpers.R
+forestparams <- site_forestparams(site_name, canopy_ceiling)  # shared_helpers.R -- unconditional default as of v7 (Phase 1.5); ceiling-scaled rule, Phase 1.4 (revised)
 
 # ── 5. Parameters ─────────────────────────────────────────────────────────────
 # If a params file was passed, load it — otherwise use literature defaults.
@@ -170,9 +198,11 @@ if (!is.null(params_file) && file.exists(params_file)) {
     sigma        =  0.10,  delta_s_base =  0.80,
     cost_repro   =  0.50,
     # ── p_r(s) × f_s(s): fecundity ──────────────────────────────────────
-    p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
+    # S (seeds/capsule) added 2026-09-02, v7 rebuild -- see reproduce()'s
+    # header in get_colonization.R for the dimensional-error background.
+    S = 1.76e6,  p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
     # ── d(x'|x): dispersal ──────────────────────────────────────────────
-    canopy_z = mean_canopy,  lambda = 1,  Ut = 1,
+    canopy_z = canopy_ceiling,  lambda = 1,  Ut = 1,
     # ── spin-up ────────────────────────────────────────────────────────────
     # Founders per species, decoupled from however many field observations
     # that species has (see get_colonization.R::run_spinup()). Note: even at
@@ -183,10 +213,10 @@ if (!is.null(params_file) && file.exists(params_file)) {
     n_founders = 30
   )
 }
-# canopy_z is site-specific (mean canopy height); always set it from this
-# site's observations, overriding whatever a shared sensitivity-experiment
-# params file may have carried.
-params$canopy_z <- mean_canopy
+# canopy_z is site-specific (max canopy height, v7 -- Phase 1.6); always set
+# it from this site's observations, overriding whatever a shared
+# sensitivity-experiment params file may have carried.
+params$canopy_z <- canopy_ceiling
 if (is.null(params$n_founders)) params$n_founders <- 30
 if (!is.null(species_file)) {
   if (!file.exists(species_file)) stop("No species_file at ", species_file)
@@ -247,7 +277,12 @@ swept_params <- names(params)[vapply(params, length, integer(1)) > 1]
 if (length(swept_params) > 1) {
   N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
   if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
-  N_REPS <- 1  # replicates per combo — factorials get large fast (see paper's 729-combo x1 design)
+  # 2026-09-09: was hardcoded to 1 (factorials get large fast) -- now reads
+  # params$n_reps if the caller set one (default still 1, unchanged for any
+  # existing params file). Needed for the targeted best-combo search
+  # (Phase F restructure): 1 replicate per combo cannot separate a real
+  # parameter effect from a single stochastic draw.
+  N_REPS <- if (!is.null(params$n_reps)) params$n_reps else 1
   param_values <- setNames(lapply(swept_params, function(nm) params[[nm]]), swept_params)
   n_combos <- prod(vapply(param_values, length, integer(1)))
   # Checkpoint by the last-listed swept parameter (expand.grid's slowest-

@@ -1,5 +1,5 @@
 # plot_functions.R
-# Reusable plotting functions for the whole canopymicroenv pipeline. Each
+# Reusable plotting functions for the whole seres pipeline. Each
 # function loads its own inputs from data/processed (or geojson_to_csv) and
 # saves its output(s) into OUTPUT_DIR — nothing here plots-and-forgets.
 # If an input file doesn't exist yet, the function skips with a message
@@ -44,8 +44,11 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
 
   # MiradorMindo.geojson retired 2026-07-22: it actually bundled observations
   # from 3 separate locations (LaElenita, MindoMirador, Saloya), now split
-  # into their own GeoJSON exports (see scripts/00_data_conversion/rebuild_combined_csv.py).
+  # into their own GeoJSON exports (see scripts/data_prep/rebuild_combined_csv.py).
   # Left on disk as an audit trail but no longer read here.
+  # Saloya excluded from this map (2026-08-29, matches batch_exp.sh's
+  # 2026-08-28 exclusion from the colonization sensitivity experiments) --
+  # this figure is meant to show the sites the model was actually run at.
   geojson_files <- c(
     Maquipucuna   = "Maquipucuna.geojson",
     Mashpi        = "Mashpi.geojson",
@@ -53,7 +56,6 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
     TarabitaMindo = "TarabitaMindo.geojson",
     LaElenita     = "LaElenita.geojson",
     MindoMirador  = "MindoMirador.geojson",
-    Saloya        = "Saloya.geojson",
     Yanayacu      = "Yanayacu.geojson"
   )
 
@@ -68,33 +70,29 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   all_features <- all_features %>%
     mutate(site = if_else(site == "TarabitaMindo", "MindoTarabita", site))
 
+  # 2026-08-29: this figure now shows observation points only -- no transect
+  # lines (removed per editorial review: too small/short at this figure's
+  # spatial scope to be legible, and only added visual clutter). Every
+  # site's label is therefore positioned from its points' own centroid;
+  # the transect-vs-point label-source split this used to need is gone.
   obs_points <- all_features %>% filter(sf::st_geometry_type(geometry) == "POINT")
-  transects  <- all_features %>% filter(sf::st_geometry_type(geometry) == "LINESTRING")
 
-  transect_labels <- transects %>%
+  site_labels <- obs_points %>%
     group_by(site) %>%
     summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
     mutate(geometry = sf::st_centroid(geometry))
-
-  fallback_labels <- obs_points %>%
-    filter(!site %in% transect_labels$site) %>%
-    group_by(site) %>%
-    summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
-    mutate(geometry = sf::st_centroid(geometry))
-
-  site_labels <- rbind(transect_labels, fallback_labels)
 
   # Per-site label offsets (degrees) — keeps long names off the dots.
-  # LaElenita/MindoMirador/Saloya added 2026-07-24 with nudge (0,0)
-  # placeholders (untuned) -- adjust once you've seen how their labels sit
-  # on the actual map.
+  # LaElenita/MindoMirador added 2026-07-24 with nudge (0,0) placeholders
+  # (untuned) -- adjust once you've seen how their labels sit on the actual
+  # map.
   label_nudges <- data.frame(
     site    = c("Mashpi", "Maquipucuna", "MindoTarabita", "Yanayacu",
-                "LaElenita", "MindoMirador", "Saloya"),
+                "LaElenita", "MindoMirador"),
     nudge_x = c( 0.00,     0.08,          0.15,            0.10,
-                 0.00,      0.00,          0.00),
+                 0.00,      0.00),
     nudge_y = c(-0.04,     0.07,         -0.05,            0.06,
-                 0.00,      0.00,          0.00)
+                 0.00,      0.00)
   )
   label_pos <- site_labels |>
     dplyr::mutate(X = sf::st_coordinates(geometry)[, 1],
@@ -114,19 +112,84 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   ylim <- c(bbox["ymin"] - 0.40, bbox["ymax"] + 0.30)
 
   site_colours <- setNames(
-    scico::scico(7, palette = "lipari", begin = 0.10, end = 0.88),
-    c("Maquipucuna", "Mashpi", "MindoTarabita", "LaElenita", "MindoMirador", "Saloya", "Yanayacu")
+    scico::scico(6, palette = "lipari", begin = 0.10, end = 0.88),
+    c("Maquipucuna", "Mashpi", "MindoTarabita", "LaElenita", "MindoMirador", "Yanayacu")
   )
+
+  # ── Mindo cluster inset ───────────────────────────────────────────────────
+  # MindoTarabita / LaElenita / MindoMirador fall within ~7 km of each other
+  # and collapse to a single smudge at the regional scale. Draw a zoomed panel
+  # over the empty SW corner of the main map (no sites there) so the three
+  # read separately, and outline the same extent on the main map so the reader
+  # can locate it. Inset labels are placed from each site's own point centroid
+  # (the regional `label_nudges` are far too large for this ~3 km window).
+  mindo_sites  <- c("MindoTarabita", "LaElenita", "MindoMirador")
+  mindo_points <- obs_points %>% filter(site %in% mindo_sites)
+  mindo_bbox   <- sf::st_bbox(mindo_points)
+  # Zoom extent: pad in y, then set x from the box centre to whatever half-width
+  # gives the inset panel a roughly square aspect (the raw cluster is a tall
+  # sliver -- ~2 km E-W vs ~7 km N-S -- and would render as an unreadable
+  # ribbon at equal scale).
+  pad_y      <- max(as.numeric(mindo_bbox["ymax"] - mindo_bbox["ymin"]) * 0.28, 0.006)
+  mindo_cx   <- mean(c(mindo_bbox["xmin"], mindo_bbox["xmax"]))
+  half_y     <- as.numeric(mindo_bbox["ymax"] - mindo_bbox["ymin"]) / 2 + pad_y
+  half_x     <- half_y * 1.4
+  mindo_xlim <- c(mindo_cx - half_x, mindo_cx + half_x)
+  mindo_ylim <- c(mindo_bbox["ymin"] - pad_y, mindo_bbox["ymax"] + pad_y)
+
+  mindo_labels <- site_labels %>%
+    dplyr::filter(site %in% mindo_sites) %>%
+    dplyr::mutate(X = sf::st_coordinates(geometry)[, 1],
+                  Y = sf::st_coordinates(geometry)[, 2]) %>%
+    sf::st_drop_geometry() %>%
+    dplyr::mutate(
+      lab_hjust = dplyr::if_else(site == "LaElenita", 1, 0),
+      X_lab     = X + dplyr::if_else(site == "LaElenita", -half_x * 0.05, half_x * 0.05)
+    )
+
+  p_inset <- ggplot() +
+    geom_sf(data = map_area, fill = "#f5f0e8", colour = "grey55", linewidth = 0.3) +
+    geom_sf(data = mindo_points, aes(colour = site), size = 2.6, alpha = 0.9,
+            shape = 16, show.legend = FALSE) +
+    geom_text(data = mindo_labels,
+              aes(x = X_lab, y = Y, label = site, colour = site, hjust = lab_hjust),
+              size = 2.3, fontface = "bold", show.legend = FALSE) +
+    scale_colour_manual(values = site_colours) +
+    coord_sf(xlim = mindo_xlim, ylim = mindo_ylim, expand = FALSE) +
+    annotation_scale(location = "br", width_hint = 0.3,
+                     height = unit(0.1, "cm"), text_cex = 0.55,
+                     pad_x = unit(0.1, "cm"), pad_y = unit(0.1, "cm")) +
+    labs(title = "Mindo sites (zoom)") +
+    theme_bw(base_size = 8) +
+    theme(
+      axis.title       = element_blank(),
+      axis.text        = element_blank(),
+      axis.ticks       = element_blank(),
+      plot.title       = element_text(size = 7.5, face = "bold"),
+      plot.background  = element_rect(fill = "white", colour = "grey30", linewidth = 0.6),
+      plot.margin      = margin(3, 3, 3, 3),
+      panel.grid       = element_blank()
+    )
+
+  # Main-map labels: LaElenita / MindoMirador are unreadably stacked on
+  # MindoTarabita at this scale -- the inset carries them, so the main map
+  # just points to it.
+  main_labels <- label_pos %>%
+    dplyr::filter(!site %in% c("LaElenita", "MindoMirador")) %>%
+    dplyr::mutate(lab = dplyr::if_else(site == "MindoTarabita",
+                                       "Mindo sites (see inset)", site))
 
   p <- ggplot() +
     geom_sf(data = map_area, fill = "#f5f0e8", colour = "grey55", linewidth = 0.35) +
     geom_sf(data = obs_points, aes(colour = site), size = 1.8, alpha = 0.55, shape = 16) +
-    geom_sf(data = transects, aes(colour = site), linewidth = 1.3, alpha = 0.85) +
-    geom_text(data = label_pos, aes(x = X, y = Y, label = site, colour = site),
+    annotate("rect", xmin = mindo_xlim[1], xmax = mindo_xlim[2],
+             ymin = mindo_ylim[1], ymax = mindo_ylim[2],
+             fill = NA, colour = "grey30", linewidth = 0.5) +
+    geom_text(data = main_labels, aes(x = X, y = Y, label = lab, colour = site),
               size = 3, fontface = "bold", show.legend = FALSE) +
     scale_colour_manual(values = site_colours, name = "Site") +
     coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
-    annotation_scale(location = "bl", width_hint = 0.25) +
+    annotation_scale(location = "br", width_hint = 0.25) +
     annotation_north_arrow(
       location = "tr", style = north_arrow_fancy_orienteering(),
       height = unit(1.2, "cm"), width = unit(1.2, "cm")
@@ -140,6 +203,11 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
       plot.title       = element_text(face = "bold"),
       plot.subtitle    = element_text(colour = "grey40")
     )
+
+  p <- p + patchwork::inset_element(
+    p_inset, left = 0.015, bottom = 0.02, right = 0.42, top = 0.44,
+    align_to = "panel"
+  )
 
   out_path <- file.path(out_dir, "site_map.png")
   ggsave(out_path, plot = p, width = 10, height = 8, dpi = 300, bg = "white")
@@ -389,123 +457,6 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   message("Saved: ", profile_path)
 
   invisible(list(volume = fig, profile = p_combined))
-}
-
-# ── Best-fit vs. realistic 3D comparison (simple standalone model) ─────────────
-plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
-  if (!exists("best_run", inherits = TRUE)) {
-    source("scripts/simple_model/simple_colonization.R")
-    best_params <- params
-    best_params$establishment_prob <- 0.10
-    best_params$repro_rate         <- 500
-    best_params$survival_A         <- 0.95
-    best_params$maxDisp            <- 4
-    best_params$n_founders         <- 100
-    best_params$carCap             <- 40
-    best_params$timesteps          <- 30
-    message("Re-running best fit...")
-    best_run <- run_simple_colonization(best_params, seed = 42)
-  }
-
-  p      <- best_run$params
-  T_last <- p$timesteps
-
-  abundA_last <- best_run$abundA[, , , T_last]
-  zone_arr    <- best_run$zone
-
-  idx <- which(abundA_last > 0, arr.ind = TRUE)
-  df  <- data.frame(
-    x = idx[, 1], y = idx[, 2], z = idx[, 3],
-    n = abundA_last[idx], zone = zone_arr[idx]
-  )
-  df$x_m <- (df$x - 0.5) * p$resolution
-  df$y_m <- (df$y - 0.5) * p$resolution
-  df$z_m <- (df$z - 0.5) * (p$max_height / p$zDim)
-
-  zone_cols <- c(
-    "1" = "#8B4513", "2" = "#A0522D", "3" = "#6B8E23",
-    "4" = "#228B22", "5" = "#32CD32"
-  )
-  df$col     <- zone_cols[as.character(df$zone)]
-  df$pt_size <- pmin(df$n / max(df$n) * 6 + 1, 7)
-
-  # Realistic-params run for comparison (above extinction threshold, not saturating)
-  source("scripts/simple_model/simple_colonization.R")
-  base_p <- params
-  base_p$establishment_prob <- 0.05
-  base_p$repro_rate         <- 150
-  base_p$carCap             <- 8
-  base_p$n_founders         <- 30
-  base_p$timesteps          <- 30
-  message("Running baseline simulation...")
-  invisible(capture.output(
-    base_out <- run_simple_colonization(base_p, seed = 7),
-    type = "output"
-  ))
-
-  make_df <- function(run_out, timestep) {
-    abA  <- run_out$abundA[, , , timestep]
-    zArr <- run_out$zone
-    idx  <- which(abA > 0, arr.ind = TRUE)
-    if (nrow(idx) == 0) return(NULL)
-    data.frame(
-      x_m = (idx[, 1] - 0.5) * run_out$params$resolution,
-      y_m = (idx[, 2] - 0.5) * run_out$params$resolution,
-      z_m = (idx[, 3] - 0.5) * (run_out$params$max_height / run_out$params$zDim),
-      n = abA[idx], zone = zArr[idx]
-    )
-  }
-
-  df_base <- make_df(base_out, base_p$timesteps)
-  df_best <- make_df(best_run, T_last)
-
-  set.seed(42)
-  df_best_plot <- df_best[sample(nrow(df_best), min(nrow(df_best), 5000)), ]
-  df_base_plot <- df_base   # usually sparse enough to keep all
-
-  add_cols <- function(df) { df$col <- zone_cols[as.character(df$zone)]; df }
-  df_base_plot <- add_cols(df_base_plot)
-  df_best_plot <- add_cols(df_best_plot)
-
-  out_path <- file.path(out_dir, "bestfit_3d.png")
-  png(out_path, width = 3200, height = 1400, res = 180, type = "cairo")
-  on.exit(dev.off(), add = TRUE)
-
-  layout(matrix(c(1, 2, 3), nrow = 1), widths = c(10, 10, 3))
-
-  plot_panel <- function(df_p, title_str, cex_sym = 0.55) {
-    par(mar = c(2, 2, 3, 1))
-    scatterplot3d(
-      x = df_p$x_m, y = df_p$y_m, z = df_p$z_m,
-      color = df_p$col, pch = 16, cex.symbols = cex_sym,
-      xlab = "East–West (m)", ylab = "South–North (m)", zlab = "Height (m)",
-      main = title_str, angle = 35, scale.y = 0.6, grid = TRUE, box = FALSE,
-      col.axis = "grey40", col.grid = "grey88", col.lab = "grey20",
-      cex.axis = 0.8, cex.lab = 0.9
-    )
-  }
-
-  plot_panel(df_base_plot,
-    sprintf("Realistic params  (p_e=0.05, λ=150, carCap=8)\nyear %d — %d adults",
-            base_p$timesteps, sum(df_base$n)))
-
-  plot_panel(df_best_plot,
-    sprintf("Best-fit params  (p_e=0.10, λ=500, carCap=40)\nyear %d — %d adults  [5k sample]",
-            T_last, sum(df_best$n)))
-
-  par(mar = c(2, 0, 3, 1))
-  plot.new()
-  legend(
-    "center",
-    legend = c("Zone 1 – trunk base", "Zone 2 – lower trunk",
-               "Zone 3 – upper trunk", "Zone 4 – inner crown",
-               "Zone 5 – outer crown"),
-    col = unname(zone_cols), pch = 16, pt.cex = 1.5, bty = "n", cex = 0.95,
-    title = "Johansson zone", title.col = "grey20", title.font = 2
-  )
-
-  message("Saved: ", out_path)
-  invisible(out_path)
 }
 
 # ── Colonization sensitivity-experiment sweeps ──────────────────────────────────
@@ -980,6 +931,7 @@ plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
                                        processed_dir = PROCESSED_DIR,
                                        height_step = 0.4,
                                        extra_species = character(0),
+                                       confirmed_only = TRUE,
                                        context = NULL) {
   ctx <- context %||% .niche_plot_context(site_name, processed_dir, height_step)
   if (is.null(ctx)) {
@@ -991,32 +943,48 @@ plot_niche_profile_curves <- function(site_name, out_dir = OUTPUT_DIR,
     message("Skipping ", site_name, " niche profile curves -- no cached niches for this site's species")
     return(invisible(NULL))
   }
-  site_species <- sort(unique(rows$species))
+  if (confirmed_only) {
+    rows <- rows[.niche_is_confirmed(rows$species) | rows$species %in% extra_species, , drop = FALSE]
+  }
+  if (nrow(rows) == 0) {
+    message("Skipping ", site_name, " niche profile curves -- no confirmed species")
+    return(invisible(NULL))
+  }
 
-  long_df <- rbind(
-    data.frame(species = rows$species, height = rows$height, score = rows$before,
-               stage = "Before ceiling rescale"),
-    data.frame(species = rows$species, height = rows$height, score = rows$after,
-               stage = "After ceiling rescale")
-  )
+  # One small panel per species (niche-height order), two lines: combined
+  # suitability along canopy height before vs. after the per-species ceiling
+  # rescale. Faceting by species instead of overplotting every species in
+  # two shared panels -- the old form was an unreadable hairball once the
+  # after-rescale curves saturate near 100. Heights binned for display, same
+  # as the all-sites niche figures.
+  sp_order <- .niche_species_order(rows)
+  long_df <- .niche_long_df(rows, c("before", "after"))
+  long_df <- .niche_bin_heights(long_df, "score", .NICHE_DISP_BIN)
+  long_df$species <- factor(.niche_sp_abbr(long_df$species), levels = .niche_sp_abbr(sp_order))
   long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
 
-  # Categorical palette (fixed slot order), cycled if a site has more species
-  # than slots -- most sites here have well under 8.
-  cat_slots <- c("#2a78d6", "#008300", "#e87ba4", "#eda100",
-                "#1baf7a", "#eb6834", "#4a3aa7", "#e34948")
-  sp_cols <- setNames(cat_slots[((seq_along(site_species) - 1) %% length(cat_slots)) + 1], site_species)
+  stage_cols <- setNames(scico::scico(2, palette = "lipari", begin = 0.30, end = 0.72),
+                         c("Before ceiling rescale", "After ceiling rescale"))
 
-  p <- ggplot(long_df, aes(x = height, y = score, colour = species)) +
-    geom_line(linewidth = 0.8) +
-    scale_colour_manual(values = sp_cols, name = "Species") +
-    facet_wrap(~stage, nrow = 1) +
-    labs(x = "Height (m)", y = "Combined suitability (0-100)",
+  n_sp <- nlevels(long_df$species)
+  ncol_f <- min(4, n_sp)
+
+  p <- ggplot(long_df, aes(x = height, y = score, colour = stage)) +
+    geom_line(linewidth = 0.7) +
+    scale_colour_manual(values = stage_cols, name = NULL) +
+    facet_wrap(~species, ncol = ncol_f) +
+    coord_cartesian(ylim = c(0, 100)) +
+    labs(x = "Height above ground (m)", y = "Combined suitability (0–100)",
          title = sprintf("Niche suitability profile — %s", site_name)) +
-    theme_minimal(base_size = 11)
+    theme_minimal(base_size = 11) +
+    theme(strip.text = element_text(face = "italic"),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom")
 
+  w <- max(7, 1.4 + ncol_f * 2.3)
+  h <- max(4, 1.6 + ceiling(n_sp / ncol_f) * 2.1)
   out_path <- file.path(out_dir, sprintf("niche_profile_curves_%s.png", site_name))
-  ggsave(out_path, plot = p, width = 12, height = 5.5, dpi = 300, bg = "white")
+  ggsave(out_path, plot = p, width = w, height = h, dpi = 300, bg = "white", limitsize = FALSE)
   message("Saved: ", out_path)
   invisible(p)
 }
@@ -1071,10 +1039,12 @@ plot_niche_suitability_heatmap <- function(site_name, out_dir = OUTPUT_DIR,
 }
 
 # ── Combined, all-sites niche-suitability data prep ─────────────────────────
-# Shared by plot_niche_suitability_grid() and plot_niche_height_trees()
-# (2026-08-28) -- both need the exact same (site, species, height,
-# before/after) long table, just re-encoded with different aesthetics
-# (site as facet row vs. site as x-position). Builds each site's context
+# Shared by every figure in the "Combined all-sites niche-suitability
+# figures" block below (plot_niche_suitability_by_site(), plot_niche_
+# forest(), plot_niche_multisite_species()) -- all need the exact same
+# (site, species, height, before/after) long table, just re-encoded with
+# different aesthetics. Callers normally reach it through
+# .niche_score_rows_all_sites_cached(). Builds each site's context
 # fresh (.niche_plot_context()) and calls the now-fixed .niche_score_rows()
 # (genuine-identification filter), tags rows with `site`, and drops/reports
 # any site left with zero confirmed species after that filter -- same
@@ -1106,109 +1076,288 @@ plot_niche_suitability_heatmap <- function(site_name, out_dir = OUTPUT_DIR,
   list(rows = all_rows, excluded = excluded)
 }
 
-# Combined niche-suitability heatmap: EVERY site's suitability in one figure,
-# grouped per species -- the "which parameter/site actually offers a
-# suitable niche for species X" view, replacing the need to flip between N
-# separate per-site heatmaps. y = site (not species, unlike the per-site
-# version above) so each species' panel directly compares every site that
-# has it; same scico "lipari" 0-100 fill and Before/After ceiling-rescale
-# facet convention as plot_niche_suitability_heatmap(), just with species as
-# a second facet dimension instead of the y-axis. 2026-08-28.
-plot_niche_suitability_grid <- function(sites = NULL, out_dir = OUTPUT_DIR,
-                                        processed_dir = PROCESSED_DIR,
-                                        height_step = 0.4, built = NULL) {
-  # built: pass a pre-computed .niche_score_rows_all_sites() result (e.g.
-  # shared with plot_niche_height_trees(), see plot_new_figures.R) to skip
-  # rebuilding every site's climate cache a second time -- 2026-08-28, this
-  # was previously rebuilt independently by each of the two combined
-  # figures (14 full climate-cache builds across 7 sites instead of 7),
-  # slow enough on the login node to be killed partway through.
+# Cached wrapper: .niche_score_rows_all_sites() is a full per-site
+# climate-cache pass (~30 min for 7 sites) and every figure in the family
+# below needs the exact same table. Cache it to data/processed/ keyed by the
+# active observations CSV + niche cache (so the default and v6 datasets get
+# separate caches) and invalidate whenever any input file (CSV, niche cache,
+# background, or a microenv_*_h<step>.rds) is newer than the cache. Callers
+# that already hold a `built` list pass it straight through.
+.niche_score_rows_all_sites_cached <- function(processed_dir = PROCESSED_DIR,
+                                               height_step = 0.4) {
+  microenv <- list.files(processed_dir,
+    pattern = sprintf("^microenv_.*_h%.2f\\.rds$", height_step), full.names = TRUE)
+  inputs <- c(OBSERVATIONS_CSV, NICHE_CACHE_PATH, NICHE_BACKGROUND_PATH, microenv)
+  inputs <- inputs[file.exists(inputs)]
+  tag <- paste0(tools::file_path_sans_ext(basename(OBSERVATIONS_CSV)), "__",
+                tools::file_path_sans_ext(basename(NICHE_CACHE_PATH)))
+  cache <- file.path(processed_dir,
+    sprintf("niche_score_rows__%s__h%.2f.rds", tag, height_step))
+  if (file.exists(cache) && length(inputs) > 0 &&
+      file.mtime(cache) >= max(file.mtime(inputs))) {
+    message("Reusing cached niche score table: ", cache)
+    return(readRDS(cache))
+  }
+  built <- .niche_score_rows_all_sites(processed_dir = processed_dir, height_step = height_step)
+  saveRDS(built, cache)
+  message("Wrote niche score table cache: ", cache)
+  built
+}
+
+# ── Combined all-sites niche-suitability figures ──────────────────────────────
+# 2026-08-29 rewrite. The previous single figure (site x height per species,
+# facet_grid(species ~ stage)) was ~35 species rows x 12 columns and mostly
+# empty -- each species occurs at only 1-2 sites -- so it rendered ~40 in
+# tall and unreadable. Replaced with a small family of focused figures that
+# share one builder (.niche_score_rows_all_sites) and helper set:
+#
+#   plot_niche_suitability_by_site()  Fig A -- per-site small multiples, the
+#                                     quantitative comparison figure.
+#   plot_niche_forest()               Fig B -- per-site bars on a fixed
+#                                     global species axis (gaps = absence).
+#   plot_niche_multisite_species()    Supp -- only species confirmed at 2+
+#                                     sites, horizontal bars faceted per species.
+#   plot_niche_suitability_by_site(stages = c("before","after"))
+#                                     Supp -- the ceiling-rescale effect.
+#   plot_niche_suitability_by_site(confirmed_only = FALSE)
+#                                     Supp -- unidentified morphospecies.
+
+# A species is "confirmed" when its Identification carries a real epithet --
+# anything of the form "<Genus> sp."/"sp"/"sp. A"/"sp1"/"sp2" is an
+# unidentified morphospecies. Kept deliberately simple (token test on the
+# epithet) rather than reusing .confirmed_species_sites(), which answers a
+# different question (was THIS row genuinely identified, vs. a blank-ID
+# default) -- here we're binning a species name, not a site membership.
+.niche_is_confirmed <- function(species) {
+  epithet <- sub("^\\S+\\s*", "", trimws(species))
+  nzchar(epithet) & !grepl("^sp(\\.|[0-9]|\\s|$)", epithet, ignore.case = TRUE)
+}
+
+# "Maxillaria acutifolia" -> "M. acutifolia" (axis labels; drawn italic).
+.niche_sp_abbr <- function(x) sub("^([A-Z])[a-z]+\\s+", "\\1. ", x)
+
+# Long (site, species, height, score, stage) table from a .niche_score_rows_
+# all_sites() result, for whichever ceiling-rescale stage(s) are asked for.
+.niche_long_df <- function(rows, stages = c("before", "after")) {
+  parts <- list()
+  if ("before" %in% stages)
+    parts$b <- data.frame(site = rows$site, species = rows$species, height = rows$height,
+                          score = rows$before, stage = "Before ceiling rescale")
+  if ("after" %in% stages)
+    parts$a <- data.frame(site = rows$site, species = rows$species, height = rows$height,
+                          score = rows$after, stage = "After ceiling rescale")
+  df <- do.call(rbind, parts)
+  df$stage <- factor(df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+  df
+}
+
+# Order species by where their niche actually sits in the canopy: the
+# suitability-weighted mean height (after-rescale, pooled across sites), so
+# every figure lists species low-canopy -> high-canopy and the height
+# gradient reads as a diagonal. Species with no positive score anywhere fall
+# back to their median modelled height.
+.niche_species_order <- function(rows) {
+  agg <- tapply(seq_len(nrow(rows)), rows$species, function(ix) {
+    w <- pmax(rows$after[ix], 0); h <- rows$height[ix]
+    if (sum(w) > 0) sum(w * h) / sum(w) else stats::median(h)
+  })
+  names(sort(unlist(agg)))
+}
+
+.NICHE_FILL <- function()
+  scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
+                       limits = c(0, 100), name = "Climate-niche suitability (0–100)")
+
+# Collapse the per-tier suitability to coarser height bins (mean) for
+# display. The raw 0.4 m tiers are spiky enough that the tiled figures read
+# as noise; ~1.5 m bins keep the vertical structure without the strobing.
+# `by` names the non-height grouping columns present in `df`.
+.niche_bin_heights <- function(df, value = "score", bin = 1.5,
+                               by = c("site", "species", "stage")) {
+  by <- intersect(by, names(df))
+  df$height <- (floor(df$height / bin) + 0.5) * bin
+  form <- stats::as.formula(sprintf("%s ~ %s", value, paste(c(by, "height"), collapse = " + ")))
+  stats::aggregate(form, data = df, FUN = mean)
+}
+.NICHE_DISP_BIN <- 1.5
+
+# ── Fig A: per-site suitability-by-height small multiples ─────────────────────
+# One panel per site; x = species (ordered by niche height, italic), y =
+# height above ground, fill = suitability. Defaults to confirmed species and
+# the after-ceiling-rescale stage only (the headline number). Pass
+# stages = c("before","after") for the rescale-effect supplement, or
+# confirmed_only = FALSE for the morphospecies supplement.
+plot_niche_suitability_by_site <- function(sites = NULL, out_dir = OUTPUT_DIR,
+                                           processed_dir = PROCESSED_DIR,
+                                           height_step = 0.4, built = NULL,
+                                           confirmed_only = TRUE,
+                                           stages = "after", file_tag = NULL) {
   built <- built %||% .niche_score_rows_all_sites(sites, processed_dir, height_step)
-  rows <- built$rows
+  rows  <- built$rows
   if (is.null(rows) || nrow(rows) == 0) {
-    message("Skipping niche suitability grid -- no sites had confirmed species")
+    message("Skipping niche suitability by site -- no sites had confirmed species")
+    return(invisible(NULL))
+  }
+  is_conf <- .niche_is_confirmed(rows$species)
+  rows <- rows[if (confirmed_only) is_conf else !is_conf, , drop = FALSE]
+  if (nrow(rows) == 0) {
+    message("Skipping niche suitability by site -- no ",
+            if (confirmed_only) "confirmed" else "morphospecies", " rows")
     return(invisible(NULL))
   }
 
-  long_df <- rbind(
-    data.frame(site = rows$site, species = rows$species, height = rows$height,
-               score = rows$before, stage = "Before ceiling rescale"),
-    data.frame(site = rows$site, species = rows$species, height = rows$height,
-               score = rows$after, stage = "After ceiling rescale")
-  )
-  long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+  sp_order <- .niche_species_order(rows)
+  df <- .niche_long_df(rows, stages)
+  df <- .niche_bin_heights(df, "score", .NICHE_DISP_BIN)
+  df$species <- factor(.niche_sp_abbr(df$species), levels = .niche_sp_abbr(sp_order))
+  df$site    <- factor(df$site)
 
-  subtitle <- if (length(built$excluded) > 0) {
-    sprintf("Excluded (no confirmed species): %s", paste(built$excluded, collapse = ", "))
-  } else {
-    NULL
-  }
+  omitted <- setdiff(sort(unique(as.character(built$rows$site))),
+                     levels(df$site))
 
-  p <- ggplot(long_df, aes(x = height, y = site, fill = score)) +
-    geom_tile() +
-    scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
-                         limits = c(0, 100), name = "Suitability\n(0-100)") +
-    facet_grid(species ~ stage) +
-    labs(x = "Height (m)", y = "Site", title = "Niche suitability by species — all sites",
-         subtitle = subtitle) +
-    theme_minimal(base_size = 11)
+  multi_stage <- length(stages) > 1
+  facet <- if (multi_stage) facet_grid(stage ~ site) else facet_wrap(~site, nrow = 2)
 
-  out_path <- file.path(out_dir, "niche_suitability_grid_all_sites.png")
-  n_species <- length(unique(long_df$species))
-  ggsave(out_path, plot = p, width = 12, height = max(6, 2 + 1.1 * n_species), dpi = 300,
-        bg = "white", limitsize = FALSE)
+  p <- ggplot(df, aes(x = species, y = height, fill = score)) +
+    geom_tile(width = 0.9, height = .NICHE_DISP_BIN * 1.02) +
+    .NICHE_FILL() +
+    facet +
+    labs(x = NULL, y = "Height above ground (m)",
+         title = if (confirmed_only)
+           "Modelled climate-niche suitability by canopy height, per site"
+         else
+           "Climate-niche suitability by canopy height — unidentified morphospecies",
+         subtitle = if (length(omitted) > 0)
+           sprintf("Not shown (no %s species): %s",
+                   if (confirmed_only) "identified" else "morphospecies",
+                   paste(omitted, collapse = ", ")) else NULL) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "italic"),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.key.width = unit(2.4, "cm"))
+
+  n_site <- nlevels(df$site); n_sp <- nlevels(df$species)
+  ncol_f <- if (multi_stage) n_site else ceiling(n_site / 2)
+  nrow_f <- 2
+  w <- max(8, 1.8 + ncol_f * (0.30 * n_sp + 0.9))
+  h <- max(5.5, 1.8 + nrow_f * 3.4)
+
+  tag <- file_tag %||% (if (!confirmed_only) "_morphospecies"
+                        else if (multi_stage) "_rescale" else "")
+  out_path <- file.path(out_dir, sprintf("niche_suitability_by_site%s.png", tag))
+  ggsave(out_path, plot = p, width = w, height = h, dpi = 300, bg = "white", limitsize = FALSE)
   message("Saved: ", out_path)
   invisible(p)
 }
 
-# "Tree" figure: the same all-sites suitability data as
-# plot_niche_suitability_grid(), re-encoded with site as the x-position
-# (a narrow vertical bar per site) and height as y -- each site's bar reads
-# as a shaded trunk, its color tracing suitability along its height, instead
-# of a species-colored line (plot_niche_profile_curves()'s "too loud with
-# many species" problem this replaces -- species is now the facet variable,
-# not a colour aesthetic, so there's no species legend to get crowded).
-# Same facet_grid(species ~ stage) as the grid heatmap for visual/code
-# consistency between the two. 2026-08-28.
-plot_niche_height_trees <- function(sites = NULL, out_dir = OUTPUT_DIR,
-                                    processed_dir = PROCESSED_DIR,
-                                    height_step = 0.4, built = NULL) {
-  # built: see plot_niche_suitability_grid()'s matching parameter.
+# ── Fig B: the "forest" ─────────────────────────────────────────────────────
+# One panel per confirmed species (niche-height order); within a panel a
+# horizontal bar per site -- height above ground on x, colour = after-rescale
+# suitability, same tiled encoding as Fig A. Every site row is drawn in every
+# panel, so a blank row reads directly as "this species is not confirmed at
+# that site". This is the "for each species, where in the canopy -- and at
+# which sites -- is the climate suitable" view; the stylised-tree-glyph
+# version was dropped 2026-08-30 (the shaping obscured more than it
+# conveyed), and the per-site orientation on 2026-09-01.
+plot_niche_forest <- function(sites = NULL, out_dir = OUTPUT_DIR,
+                              processed_dir = PROCESSED_DIR,
+                              height_step = 0.4, built = NULL) {
   built <- built %||% .niche_score_rows_all_sites(sites, processed_dir, height_step)
-  rows <- built$rows
+  rows  <- built$rows
   if (is.null(rows) || nrow(rows) == 0) {
-    message("Skipping niche height trees -- no sites had confirmed species")
+    message("Skipping niche forest -- no sites had confirmed species")
+    return(invisible(NULL))
+  }
+  rows <- rows[.niche_is_confirmed(rows$species), , drop = FALSE]
+  if (nrow(rows) == 0) {
+    message("Skipping niche forest -- no confirmed species")
     return(invisible(NULL))
   }
 
-  long_df <- rbind(
-    data.frame(site = rows$site, species = rows$species, height = rows$height,
-               score = rows$before, stage = "Before ceiling rescale"),
-    data.frame(site = rows$site, species = rows$species, height = rows$height,
-               score = rows$after, stage = "After ceiling rescale")
-  )
-  long_df$stage <- factor(long_df$stage, levels = c("Before ceiling rescale", "After ceiling rescale"))
+  rows <- .niche_bin_heights(rows, "after", .NICHE_DISP_BIN, by = c("site", "species"))
 
-  subtitle <- if (length(built$excluded) > 0) {
-    sprintf("Excluded (no confirmed species): %s", paste(built$excluded, collapse = ", "))
-  } else {
-    NULL
+  sp_order   <- .niche_species_order(rows)
+  # Sites ordered by their modelled canopy height (shortest at the bottom of
+  # each panel), so every panel's y-axis reads the same way.
+  site_hmax  <- tapply(rows$height, rows$site, max)
+  rows$site  <- factor(rows$site, levels = names(sort(site_hmax)))
+  rows$species <- factor(.niche_sp_abbr(rows$species), levels = .niche_sp_abbr(sp_order))
+
+  p <- ggplot(rows, aes(x = height, y = site, fill = after)) +
+    geom_tile(height = 0.78, width = .NICHE_DISP_BIN * 1.02) +
+    .NICHE_FILL() +
+    scale_y_discrete(drop = FALSE) +
+    facet_wrap(~species, ncol = 4) +
+    labs(x = "Height above ground (m)", y = NULL,
+         title = "Confirmed-species climate niches, by species and site",
+         subtitle = paste("Colour = climate-niche suitability along each site's canopy;",
+                          "a blank row = species not confirmed at that site")) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.major.y = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.text = element_text(face = "italic"),
+          legend.position = "bottom",
+          legend.key.width = unit(2.4, "cm"))
+
+  n_sp <- length(sp_order); n_site <- nlevels(rows$site)
+  ncol_f <- min(4, n_sp)
+  w <- max(10, 1.6 + ncol_f * 2.7)
+  h <- max(4.5, 1.4 + ceiling(n_sp / ncol_f) * (0.5 + 0.28 * n_site))
+  out_path <- file.path(out_dir, "niche_forest_all_sites.png")
+  ggsave(out_path, plot = p, width = w, height = h, dpi = 300, bg = "white", limitsize = FALSE)
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Supp: species confirmed at 2+ sites, cross-site niche comparison ─────────
+# The subset where a site-to-site comparison is even meaningful. One panel
+# per species; horizontal bars -- y = site, x = height, fill = after-rescale
+# suitability -- so each site's niche profile reads as a strip and the sites
+# stack for direct comparison.
+plot_niche_multisite_species <- function(sites = NULL, out_dir = OUTPUT_DIR,
+                                         processed_dir = PROCESSED_DIR,
+                                         height_step = 0.4, built = NULL) {
+  built <- built %||% .niche_score_rows_all_sites(sites, processed_dir, height_step)
+  rows  <- built$rows
+  if (is.null(rows) || nrow(rows) == 0) {
+    message("Skipping niche multi-site species -- no sites had confirmed species")
+    return(invisible(NULL))
+  }
+  rows <- rows[.niche_is_confirmed(rows$species), , drop = FALSE]
+  site_counts <- table(unique(rows[, c("site", "species")])$species)
+  multi <- names(site_counts)[site_counts >= 2]
+  rows <- rows[rows$species %in% multi, , drop = FALSE]
+  if (nrow(rows) == 0) {
+    message("Skipping niche multi-site species -- none confirmed at 2+ sites")
+    return(invisible(NULL))
   }
 
-  p <- ggplot(long_df, aes(x = site, y = height, fill = score)) +
-    geom_tile(width = 0.85) +
-    scale_fill_gradientn(colours = scico::scico(100, palette = "lipari"),
-                         limits = c(0, 100), name = "Suitability\n(0-100)") +
-    facet_grid(species ~ stage) +
-    labs(x = NULL, y = "Height (m)", title = "Niche suitability by height — all sites",
-         subtitle = subtitle) +
-    theme_minimal(base_size = 11) +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  sp_order <- .niche_species_order(rows)
+  df <- .niche_long_df(rows, "after")
+  df <- .niche_bin_heights(df, "score", .NICHE_DISP_BIN)
+  df$species <- factor(.niche_sp_abbr(df$species), levels = .niche_sp_abbr(sp_order))
 
-  out_path <- file.path(out_dir, "niche_height_trees_all_sites.png")
-  n_species <- length(unique(long_df$species))
-  ggsave(out_path, plot = p, width = 12, height = max(6, 2 + 1.1 * n_species), dpi = 300,
-        bg = "white", limitsize = FALSE)
+  p <- ggplot(df, aes(x = height, y = site, fill = score)) +
+    geom_tile(height = 0.82, width = .NICHE_DISP_BIN * 1.02) +
+    .NICHE_FILL() +
+    facet_wrap(~species, scales = "free_y", ncol = 2) +
+    labs(x = "Height above ground (m)", y = NULL,
+         title = "Species confirmed at 2+ sites — cross-site niche comparison") +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.major.y = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.key.width = unit(2.4, "cm"),
+          strip.text = element_text(face = "italic"))
+
+  n_sp <- length(multi); n_site <- length(unique(df$site))
+  ncol_f <- min(2, n_sp)
+  w <- max(8, 1.5 + ncol_f * 4.2)
+  h <- max(3.5, 1.2 + ceiling(n_sp / ncol_f) * (0.5 + 0.42 * n_site))
+  out_path <- file.path(out_dir, "niche_multisite_species.png")
+  ggsave(out_path, plot = p, width = w, height = h, dpi = 300, bg = "white", limitsize = FALSE)
   message("Saved: ", out_path)
   invisible(p)
 }
@@ -1222,7 +1371,7 @@ plot_niche_height_trees <- function(sites = NULL, out_dir = OUTPUT_DIR,
   total <- totalS + totalJ + totalA
   n_sp <- state$n_species
   par(mfrow = c(1, n_sp + 1), mar = c(4, 4, 3, 2))
-  for (sp in 1:n_sp) {
+  for (sp in seq_len(n_sp)) {
     ts_S <- sapply(1:t, function(i) sum(abundanceS[, , , i, sp]))
     ts_J <- sapply(1:t, function(i) sum(abundanceJ[, , , i, sp]))
     ts_A <- sapply(1:t, function(i) sum(abundanceA[, , , i, sp]))
@@ -1272,7 +1421,7 @@ plot_abundance <- function(result, t = NULL, species_specific = TRUE) {
   n_panels <- if (species_specific) state$n_species + 1L else 1L
   par(mfrow = c(1, n_panels), mar = c(4, 4, 3, 2))
   if (species_specific) {
-    for (sp in 1:state$n_species) {
+    for (sp in seq_len(state$n_species)) {
       ts_S <- sapply(1:t_max, function(i) sum(result$abundanceS[, , , i, sp]))
       ts_J <- sapply(1:t_max, function(i) sum(result$abundanceJ[, , , i, sp]))
       ts_A <- sapply(1:t_max, function(i) sum(result$abundanceA[, , , i, sp]))
@@ -1513,7 +1662,7 @@ plot_3d_abundance <- function(result, t = NULL, show_canopy = TRUE,
   if (is.null(t)) t <- dim(result$abundanceA)[4]
   sp_cols <- .species_colors(state$n_species)  # shared_helpers.R
   rows <- list()
-  for (sp in 1:state$n_species) {
+  for (sp in seq_len(state$n_species)) {
     sp_name <- state$species_ids[sp]
     col <- sp_cols[sp]
     for (stg in list(

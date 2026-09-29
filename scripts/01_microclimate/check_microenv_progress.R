@@ -5,7 +5,7 @@
 # yet. Read-only — safe to run any time.
 #
 # Usage:
-#   export CANOPY_SCRATCH=$(ws_find canopymicroenv)
+#   export CANOPY_SCRATCH=$(ws_find seres)
 #   module load GCCcore/13.3.0 R/4.4.2-gfbf-2024a
 #   # Needed so terra can actually load vhgt.tif for sites without measured
 #   # CanopyHeight_m — without this, height_ceiling() (lib.R) silently falls
@@ -20,6 +20,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/config/paths.R")
+source("scripts/02_model/config/shared_helpers.R")  # .filter_maxillariinae() -- 2026-08-29
 source("scripts/01_microclimate/lib.R")
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -28,7 +29,7 @@ HEIGHT_STEPS <- if (length(args) >= 2) as.numeric(strsplit(args[2], ",")[[1]]) e
 scratch <- Sys.getenv("CANOPY_SCRATCH", unset = "")
 if (nchar(scratch) == 0 || !dir.exists(scratch)) {
   stop("CANOPY_SCRATCH not set to an existing directory.\n",
-       "Run: export CANOPY_SCRATCH=$(ws_find canopymicroenv)")
+       "Run: export CANOPY_SCRATCH=$(ws_find seres)")
 }
 
 niches <- load_observations()

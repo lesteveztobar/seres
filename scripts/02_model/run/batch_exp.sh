@@ -27,19 +27,19 @@
 # it in a full SITES x EXP batch_exp.sh submission.
 #
 # Usage: sbatch batch_exp.sh
-# Run from: /home/s38leste_hpc/canopymicroenv/
+# Run from: /home/s38leste_hpc/seres/
 #
 #SBATCH --partition=intelsr_short
 #SBATCH --account=ag_biob_scabral
 #SBATCH --time=00:05:00
 #SBATCH --ntasks=1
-#SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_array_%j.out
+#SBATCH --output=/home/s38leste_hpc/seres/logs/log_array_%j.out
 
 module purge
 module load GCCcore/13.3.0
 module load R/4.4.2-gfbf-2024a
 
-Rscript scripts/02_model/setup/make_params.R
+Rscript scripts/diagnostics/make_params.R
 
 # Master observations CSV -- mirrors paths.R's OBSERVATIONS_CSV (same
 # CANOPY_OBS_CSV override, same default). SITES is derived from it rather
@@ -71,11 +71,11 @@ SITES=($(printf '%s\n' "${SITES[@]}" | grep -v '^$'))
 EXP=("pollination_success" "adult_survival_intercept" "germination_probability" "reproduction_cost" "climate_sensitivity_rh" "precipitation_sensitivity" "founder_number" "reproduction_factorial_v3")
 PARAMS=("p_poll.rds" "beta0A.rds" "p_germ.rds" "cost_repro.rds" "beta_rh.rds" "beta_precip.rds" "n_founders.rds" "reproduction_factorial_v3.rds")
 
-PARAMS_DIR="/home/$USER/canopymicroenv/data/params"
+PARAMS_DIR="/home/$USER/seres/data/params"
 
 for i in "${!SITES[@]}"; do
     for k in "${!EXP[@]}"; do
-        sbatch /home/$USER/canopymicroenv/scripts/02_model/run/run_colonization.sh \
+        sbatch /home/$USER/seres/scripts/02_model/run/run_colonization.sh \
             "${SITES[$i]}" \
             "$PARAMS_DIR/${PARAMS[$k]}" \
             "${EXP[$k]}"

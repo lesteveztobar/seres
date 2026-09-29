@@ -11,7 +11,7 @@
 # per-site SBATCH directives live. Everything else here (the plain R entry
 # points) has no SBATCH header and can be dispatched directly.
 #
-# Run from: /home/s38leste_hpc/canopymicroenv/
+# Run from: /home/s38leste_hpc/seres/
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -55,7 +55,7 @@ CMD="$1"; shift
 case "$CMD" in
   site)          Rscript "$HERE/run_microclimate_site.R" "$@" ;;
   progress)      Rscript "$HERE/check_microenv_progress.R" "$@" ;;
-  fix-dtm)       Rscript "$HERE/regenerate_missing_dtm.R" "$@" ;;
+  fix-dtm)       Rscript "$(dirname "$HERE")/diagnostics/regenerate_missing_dtm.R" "$@" ;;
   submit-site)   sbatch "$HERE/microenv_array.sh" "${2:-12}" "${3:-0.1}" "$1" ;;
   submit-array)  sbatch "$HERE/microenv_array.sh" "$@" ;;
   help|-h|--help) usage ;;

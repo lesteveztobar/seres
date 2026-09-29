@@ -73,7 +73,7 @@ height_ceiling <- function(measured, vhgt_path, hobs_max, log_fn = NULL) {
 # Part 1: data acquisition (formerly get_climateinputs.R)
 # ═══════════════════════════════════════════════════════════════════════════
 # get_climateinputs.R
-# Data acquisition pipeline for canopymicroenv
+# Data acquisition pipeline for seres
 # Lizeth Estévez Tobar — University of Bonn, 2026
 
 # ── Site preparation ──────────────────────────────────────────────────────────
@@ -118,6 +118,103 @@ make_sites <- function(csv_path, pad = 0.01) {
     ) |>
     dplyr::mutate(hCanopy_max = ifelse(is.finite(hCanopy_max), hCanopy_max, NA_real_)) |>
     dplyr::rename(Site = Area_or_Site)
+}
+
+# ── ERA5 grid-snap (2026-09-08) ────────────────────────────────────────────────
+# `microclimf::runpointmodela()` builds ONE independent point-model weather
+# series per valid ERA5 grid cell (0.25deg native resolution) inside the
+# requested domain, substituting the first valid one for any invalid cell --
+# see run_microclimate_site.R's own comment at that substitution line. A
+# domain that happens to enclose only ONE valid grid cell has nothing to
+# substitute FROM if that one cell is itself invalid (exactly what collapsed
+# MindoMirador's 2026-09-07 re-run, 1/9 valid vs. 2/9 at every prior run).
+# The site's own bbox+pad domain (~0.30deg, just over one 0.25deg ERA5 cell
+# width) isn't aligned to the ERA5 grid, so how many/which cells it lands on
+# is sensitive to the bbox's exact position -- a small centroid shift (e.g.
+# this session's earlier Saloya relabel) can flip it.
+#
+# Fix: after computing the padded bbox, shift it (never resize it -- domain
+# size must stay fixed so memory/partition sizing is unaffected) by the
+# MINIMUM offset, along whichever single axis (lat or lon) needs the least
+# movement, so the domain provably encloses at least 2 ERA5 grid-point
+# centres (hence >=2 candidate cells) rather than leaving that to chance.
+# Deterministic and computed purely from the ERA5 grid (multiples of
+# ERA5_RES) and the site's own already-padded bbox -- no data dependency
+# beyond that.
+ERA5_RES <- 0.25  # ERA5 reanalysis native grid spacing, degrees
+
+# Grid points (multiples of `res`) whose value lies in [lo, hi].
+.era5_grid_points_in <- function(lo, hi, res = ERA5_RES) {
+  k0 <- ceiling(lo / res - 1e-9)
+  k1 <- floor(hi / res + 1e-9)
+  if (k1 < k0) return(numeric(0))
+  (k0:k1) * res
+}
+
+# Minimal-|shift| new [center-ext/2, center+ext/2] that encloses >=2 grid
+# points, keeping `ext` (domain width on this axis) unchanged. Returns a list
+# with $shift (0 if already >=2 points), $lo, $hi, $points.
+.era5_minimal_shift_axis <- function(center, ext, res = ERA5_RES) {
+  lo <- center - ext / 2; hi <- center + ext / 2
+  pts <- .era5_grid_points_in(lo, hi, res)
+  if (length(pts) >= 2) return(list(shift = 0, lo = lo, hi = hi, points = pts))
+  home <- if (length(pts) == 1) pts[1] else round(center / res) * res
+  best <- NULL
+  for (target in c(home - res, home + res)) {
+    needed_lo <- min(home, target); needed_hi <- max(home, target)
+    if (needed_hi - needed_lo > ext) next  # can't fit both within this axis's width
+    new_center <- (needed_lo + needed_hi) / 2
+    shift <- new_center - center
+    if (is.null(best) || abs(shift) < abs(best$shift)) {
+      best <- list(shift = shift, lo = new_center - ext / 2, hi = new_center + ext / 2,
+                   points = c(home, target))
+    }
+  }
+  if (is.null(best)) {
+    # Domain narrower than one ERA5 cell spacing on this axis -- can't
+    # reach a second grid point without growing the domain, which this fix
+    # deliberately never does. Caller decides whether to try the other axis.
+    return(list(shift = NA_real_, lo = lo, hi = hi, points = pts))
+  }
+  best
+}
+
+# Applies the minimal single-axis shift to a padded bbox (lat_min/lat_max/
+# lon_min/lon_max, as make_sites()/the cluster bbox builder both produce),
+# preferring whichever axis is already covered (0 shift) and otherwise
+# whichever axis needs the smaller physical (km) shift. Returns the
+# (possibly-shifted) bbox plus a `.era5_grid_snap` list documenting exactly
+# what was done, for logging/reporting -- never silent.
+era5_grid_snap <- function(lat_min, lat_max, lon_min, lon_max) {
+  lat_c <- (lat_min + lat_max) / 2; lat_ext <- lat_max - lat_min
+  lon_c <- (lon_min + lon_max) / 2; lon_ext <- lon_max - lon_min
+  lat_fit <- .era5_minimal_shift_axis(lat_c, lat_ext)
+  lon_fit <- .era5_minimal_shift_axis(lon_c, lon_ext)
+  km_per_deg_lat <- 111.32
+  km_per_deg_lon <- 111.32 * cos(lat_c * pi / 180)
+
+  lat_pts0 <- .era5_grid_points_in(lat_min, lat_max)
+  lon_pts0 <- .era5_grid_points_in(lon_min, lon_max)
+  if (length(lat_pts0) >= 2 || length(lon_pts0) >= 2) {
+    return(list(lat_min = lat_min, lat_max = lat_max, lon_min = lon_min, lon_max = lon_max,
+                era5_grid_snap = list(axis = "none", shift_deg = 0, shift_km = 0,
+                                       lat_points = lat_pts0, lon_points = lon_pts0)))
+  }
+
+  lat_km <- if (is.na(lat_fit$shift)) Inf else abs(lat_fit$shift) * km_per_deg_lat
+  lon_km <- if (is.na(lon_fit$shift)) Inf else abs(lon_fit$shift) * km_per_deg_lon
+  if (is.infinite(lat_km) && is.infinite(lon_km)) {
+    stop("era5_grid_snap(): neither axis can reach a 2nd ERA5 grid point without widening the domain -- domain is narrower than one ERA5 cell spacing.")
+  }
+  if (lat_km <= lon_km) {
+    list(lat_min = lat_fit$lo, lat_max = lat_fit$hi, lon_min = lon_min, lon_max = lon_max,
+         era5_grid_snap = list(axis = "lat", shift_deg = lat_fit$shift, shift_km = lat_km,
+                                lat_points = lat_fit$points, lon_points = lon_pts0))
+  } else {
+    list(lat_min = lat_min, lat_max = lat_max, lon_min = lon_fit$lo, lon_max = lon_fit$hi,
+         era5_grid_snap = list(axis = "lon", shift_deg = lon_fit$shift, shift_km = lon_km,
+                                lat_points = lat_pts0, lon_points = lon_fit$points))
+  }
 }
 
 # ── ERA5 data acquisition ─────────────────────────────────────────────────────
@@ -425,6 +522,53 @@ get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE, outpu
 
 # ── Terrain and landcover ─────────────────────────────────────────────────────
 
+# Cache-validity guard (2026-09-10). The get_dtm()/get_landcover()/get_lai()/
+# get_albedo()/get_vegetation() cache checks were filename-only -- they
+# returned a cached raster without checking it actually covers the requested
+# domain `r`. When the model domain changed (e.g. the ERA5 grid-snap, now
+# removed, shifted it up to 11.5 km) the pipeline silently kept stale
+# terrain while ERA5 was re-pulled for the new domain -- MindoMirador's
+# microclimate collapsed because the shifted ERA5 cells fell off the
+# unchanged DTM. This returns TRUE only if the cached raster's extent
+# ENCLOSES the requested extent (with a small tolerance for reprojection
+# rounding). `cached` may be a path or a SpatRaster.
+.cache_covers <- function(cached, r, tol_deg = 0.003, log_fn = NULL,
+                          default_on_unreadable = FALSE) {
+  say <- function(...) if (!is.null(log_fn)) log_fn(sprintf(...)) else message(sprintf(...))
+  cr <- tryCatch({
+    if (inherits(cached, "SpatRaster")) cached
+    else if (is.character(cached)) {
+      is_rds <- grepl("\\.rds$", cached, ignore.case = TRUE)
+      if (is_rds) {
+        y <- tryCatch(readRDS(cached), error = function(e) NULL)
+        if (inherits(y, "PackedSpatRaster")) terra::unwrap(y)
+        else if (inherits(y, "SpatRaster")) {
+          # a SpatRaster from saveRDS() is usually a broken on-disk pointer;
+          # trust it only if terra can actually read its extent
+          if (tryCatch({ terra::ext(y); TRUE }, error = function(e) FALSE)) y else NULL
+        } else if (inherits(y, "list") && !is.null(y$gref)) {
+          tryCatch(terra::unwrap(y$gref), error = function(e) NULL)
+        } else NULL
+      } else {
+        tryCatch(terra::rast(cached), error = function(e) NULL)
+      }
+    } else NULL
+  }, error = function(e) NULL)
+  if (is.null(cr)) {
+    say("  cache guard: could not read cached object as a raster -- %s.",
+        if (default_on_unreadable) "cannot verify extent, trusting the cache" else "treating as stale")
+    return(default_on_unreadable)
+  }
+  ce <- as.vector(terra::ext(cr)); re <- as.vector(terra::ext(r))
+  encl <- (ce[1] <= re[1] + tol_deg) && (ce[2] >= re[2] - tol_deg) &&
+          (ce[3] <= re[3] + tol_deg) && (ce[4] >= re[4] - tol_deg)
+  if (!encl) {
+    say("  cache guard: cached extent [%.4f,%.4f,%.4f,%.4f] does NOT enclose requested [%.4f,%.4f,%.4f,%.4f] -- re-acquiring.",
+        ce[1], ce[2], ce[3], ce[4], re[1], re[2], re[3], re[4])
+  }
+  encl
+}
+
 # Downloads a digital elevation model for the site extent via elevatr.
 # Projects r to UTM first so the downloaded DEM has a sensible metric resolution,
 # then reprojects the result back to WGS84 (EPSG:4326) to match all other inputs.
@@ -433,10 +577,11 @@ get_dtm <- function(r, dir, mask = FALSE) {
   message("")
   cache_file <- file.path(dir, "dtm.tif")
 
-  if (file.exists(cache_file)) {
+  if (file.exists(cache_file) && .cache_covers(cache_file, r)) {
     message("DTM cache found, loading...")
     return(terra::rast(cache_file))
   }
+  if (file.exists(cache_file)) unlink(cache_file)  # stale -- make room for the re-download
 
   message("Downloading digital elevation model...")
   # dem_download resamples to the template raster, so a 2×2 template gives a
@@ -454,7 +599,7 @@ get_dtm <- function(r, dir, mask = FALSE) {
   dtm <- microclimdata::dem_download(r = r_utm90, msk = FALSE)
   dtm <- terra::project(dtm, "EPSG:4326")
 
-  terra::writeRaster(dtm, cache_file)
+  terra::writeRaster(dtm, cache_file, overwrite = TRUE)
   message("DTM downloaded and cached: ", nrow(dtm), " x ", ncol(dtm),
           " pixels at ", round(terra::res(dtm)[1] * 111320, 0), "m resolution")
   return(dtm)
@@ -470,7 +615,7 @@ get_landcover <- function(site, r, out_dir, type = "ESA",
   save_path    <- file.path(out_dir, paste0(site$Site, "_landcover_", type, ".tif"))
   drive_prefix <- paste0(site$Site, "_ESA_WorldCover")
 
-  if (file.exists(save_path) && !overwrite) {
+  if (file.exists(save_path) && !overwrite && .cache_covers(save_path, r)) {
     message("Landcover already exists on disk, loading...")
     return(terra::rast(save_path))
   }
@@ -521,6 +666,14 @@ get_lai <- function(r, tme, pathout, credentials, reso = 500) {
   lai_file     <- file.path(pathout, "lai_mosaic.tif")
   existing_hdf <- list.files(pathout, pattern = "\\.hdf$", full.names = TRUE)
 
+  # re-mosaic (and, if the tiles don't cover it, re-download) when the
+  # cached mosaic doesn't enclose the requested domain -- see .cache_covers()
+  lai_stale <- file.exists(lai_file) && !.cache_covers(lai_file, r)
+  if (lai_stale) {
+    message("LAI mosaic cache does not cover the requested domain -- rebuilding.")
+    unlink(lai_file)
+  }
+
   if (!file.exists(lai_file)) {
     if (length(existing_hdf) == 0) {
       message("Downloading MODIS LAI...")
@@ -539,7 +692,7 @@ get_lai <- function(r, tme, pathout, credentials, reso = 500) {
     }
     message("Mosaicing LAI tiles...")
     laidata <- microclimdata::lai_mosaic(r = r, pathin = paste0(pathout, "/"), reso = reso)
-    terra::writeRaster(laidata, lai_file)
+    terra::writeRaster(laidata, lai_file, overwrite = TRUE)
   } else {
     message("LAI mosaic cache found, loading...")
     laidata <- terra::rast(lai_file)
@@ -557,6 +710,11 @@ get_albedo <- function(r, tme, pathout, credentials) {
   dir.create(pathout, recursive = TRUE, showWarnings = FALSE)
   alb_cache <- file.path(pathout, "albedo_processed.rds")
 
+  # Albedo/soil/reflectance caches are saveRDS'd SpatRasters (often broken
+  # on-disk pointers) -- the .cache_covers() extent check isn't reliable on
+  # them and re-downloading MODIS is slow/fragile. Filename-only, as before;
+  # albedo resamples to the DTM/landcover grid downstream, so a small extent
+  # shortfall is filled with NA at the very edge, not silently wrong.
   if (file.exists(alb_cache)) {
     message("Albedo cache found, loading...")
     return(readRDS(alb_cache))
@@ -628,16 +786,31 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
   vhgt_file    <- file.path(dir, "vhgt.tif")
   drive_prefix <- paste0("canopy_height_", site_name)
 
-  if (!file.exists(vhgt_file)) {
+  # invalidate a stale vhgt cache that doesn't cover the current domain
+  # (reference = the landcover grid, already extent-checked upstream)
+  if (file.exists(vhgt_file) && !.cache_covers(vhgt_file, lcover)) {
+    message("Vegetation-height cache does not cover the current domain -- re-acquiring.")
+    unlink(vhgt_file)
+  }
+
+  # 2026-09-24 (MindoMirador root cause): the Drive lookup below accepted ANY
+  # file matching canopy_height_<site> without checking it covers the requested
+  # domain. MindoMirador's Drive copy was a stale ~550 m x 780 m export (from
+  # an earlier tight-domain definition), so on the 3x3 ERA5-resolution grid
+  # microclimf::runpointmodela() builds, only 1 of 9 cells had a non-NA
+  # vegetation height -> 1/9 valid point models -> all-NA runmicro output.
+  # Now: a downloaded/cached vhgt must pass .cache_covers() against the
+  # landcover grid; if the legacy-named Drive file does not cover the domain
+  # it is NOT deleted (Drive is shared state) -- a fresh export is made under
+  # the distinct prefix canopy_height_full_<site> and used instead.
+  .fetch_vhgt <- function(prefix, allow_export) {
     googledrive::drive_auth(email = "lizethestevezt@gmail.com", cache = "~/.secrets")
     folder      <- googledrive::drive_find(pattern = "rgee_backup", type = "folder", n_max = 1)
     drive_files <- googledrive::drive_ls(folder)
-    drive_file  <- drive_files[grepl(drive_prefix, drive_files$name), ]
-
+    drive_file  <- drive_files[grepl(prefix, drive_files$name, fixed = TRUE), ]
     if (nrow(drive_file) == 0) {
-      message("Vegetation height not found on Drive — exporting from GEE for ", site_name, "...")
-      # patch vegheight_download to use a site-specific Drive filename
-      .orig_vhgt <- get("vegheight_download", envir = getNamespace("microclimdata"))
+      if (!allow_export) return(FALSE)
+      message("Vegetation height '", prefix, "' not found on Drive -- exporting from GEE for ", site_name, "...")
       assignInNamespace("vegheight_download",
         function(r, GoogleDrivefolder, pathtopython, projectname = NA, silent = FALSE) {
           reticulate::use_python(pathtopython, required = TRUE)
@@ -652,9 +825,9 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
           canopy_height <- rgee::ee$Image("users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1")
           task <- rgee::ee$batch$Export$image$toDrive(
             image          = canopy_height,
-            description    = paste0("canopy_height_", site_name),
+            description    = prefix,
             folder         = GoogleDrivefolder,
-            fileNamePrefix = drive_prefix,
+            fileNamePrefix = prefix,
             region         = aoi_coords,
             scale          = 10,
             crs            = epsg_code
@@ -671,17 +844,31 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
                               unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python3.12"),
         projectname       = "ee-lizethestevezt"
       )
-      # re-check Drive after export
       drive_files <- googledrive::drive_ls(folder)
-      drive_file  <- drive_files[grepl(drive_prefix, drive_files$name), ]
-      if (nrow(drive_file) == 0)
-        stop("GEE export completed but ", drive_prefix, " not found on Drive")
+      drive_file  <- drive_files[grepl(prefix, drive_files$name, fixed = TRUE), ]
+      if (nrow(drive_file) == 0) stop("GEE export completed but ", prefix, " not found on Drive")
     } else {
-      message("Vegetation height found on Drive for ", site_name, ", downloading...")
+      message("Vegetation height '", prefix, "' found on Drive for ", site_name, ", downloading...")
     }
-
     googledrive::drive_download(file = drive_file[1, ], path = vhgt_file, overwrite = TRUE)
+    TRUE
+  }
+
+  if (!file.exists(vhgt_file)) {
+    ok <- .fetch_vhgt(drive_prefix, allow_export = FALSE) && .cache_covers(vhgt_file, lcover)
+    if (!ok) {
+      if (file.exists(vhgt_file)) {
+        message("Drive file '", drive_prefix, "' does NOT cover the current domain -- not using it; exporting a full-domain raster under 'canopy_height_full_", site_name, "'.")
+        unlink(vhgt_file)
+      }
+      .fetch_vhgt(paste0("canopy_height_full_", site_name), allow_export = TRUE)
+    }
     message("Vegetation height downloaded and cached.")
+  }
+  # hard stop: whatever we ended up with MUST cover the domain (this is the
+  # exact condition whose failure silently collapsed MindoMirador)
+  if (!.cache_covers(vhgt_file, lcover)) {
+    stop("vhgt.tif for ", site_name, " does not enclose the model domain even after re-acquisition -- refusing to build vegparams from it.")
   }
   vhgt <- terra::rast(vhgt_file)
 
@@ -712,6 +899,8 @@ get_soil <- function(r, dir, landcover, refldata) {
   message("")
   soil_cache <- file.path(dir, "soilproperties.rds")
 
+  # soilproperties.rds is a saveRDS'd raster stack -- filename-only, like
+  # albedo. It resamples to the landcover/DTM grid downstream.
   if (!file.exists(soil_cache)) {
     message("Downloading SoilGrids data...")
     soil_r <- r

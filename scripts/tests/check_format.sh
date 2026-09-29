@@ -10,7 +10,7 @@
 mkdir -p logs
 
 Rscript -e '
-x <- readRDS("/lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_LaElenita_heights/h0.10.rds")
+x <- readRDS("/lustre/scratch/data/s38leste_hpc-seres/microenv_LaElenita_heights/h0.10.rds")
 cat("Top-level names:\n")
 print(names(x))
 cat("\nStructure (names only, 2 levels deep):\n")

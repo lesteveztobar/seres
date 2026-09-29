@@ -10,10 +10,10 @@
 mkdir -p logs
 
 for site in LaElenita Maquipucuna Mashpi MindoMirador MindoTarabita Saloya Yanayacu; do
-  for dir in /lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_${site}_heights \
-             /lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_${site}_h0.25_heights \
-             /lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_${site}_h0.50_heights \
-             /lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_${site}_h1.00_heights; do
+  for dir in /lustre/scratch/data/s38leste_hpc-seres/microenv_${site}_heights \
+             /lustre/scratch/data/s38leste_hpc-seres/microenv_${site}_h0.25_heights \
+             /lustre/scratch/data/s38leste_hpc-seres/microenv_${site}_h0.50_heights \
+             /lustre/scratch/data/s38leste_hpc-seres/microenv_${site}_h1.00_heights; do
     if [ -d "$dir" ]; then
       echo "$(du -sh "$dir")"
     else

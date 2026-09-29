@@ -5,7 +5,8 @@
 .Ruserdata
 
 # --- Raw and processed data (not tracked) ---
-data/raw/*
+data/raw
+data/csv
 data/processed/*
 
 # --- Model outputs, figures, rasters ---
@@ -64,7 +65,11 @@ data/params/*
 
 # --- Report ---
 report
+docs
 
 # --- Literature ---
 data/literature
 data/literature_staging
+
+# --- Help ---
+graphify-out
