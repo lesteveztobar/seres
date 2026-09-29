@@ -203,8 +203,8 @@ main <- function() {
         return(invisible(NULL))
     }
 
-    log_msg("Loading parameters from ", file.path(PARAMS_DIR, "realistic_273founders.rds"))
-    params <- readRDS(file.path(PARAMS_DIR, "realistic_273founders.rds"))
+    log_msg("Loading parameters from ", file.path(PARAMS_DIR, "realistic_75founders.rds"))
+    params <- readRDS(file.path(PARAMS_DIR, "realistic_75founders.rds"))
     if (!is.null(opts$n_founders)) params$n_founders <- opts$n_founders
 
     log_msg("Building flat-mean climate cache")

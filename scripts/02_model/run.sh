@@ -11,7 +11,7 @@
 # For the plain R driver/diagnostic/plotting scripts, see run.R in this
 # directory.
 #
-# Run from: /home/s38leste_hpc/canopymicroenv/
+# Run from: /home/s38leste_hpc/seres/
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -65,13 +65,13 @@ CMD="$1"; shift
 case "$CMD" in
   submit-colonization)            sbatch "$HERE/run/run_colonization.sh" "$@" ;;
   submit-batch-exp)               sbatch "$HERE/run/batch_exp.sh" "$@" ;;
-  submit-niches)                  sbatch "$HERE/setup/characterize_niches.sh" "$@" ;;
-  submit-resolution-diagnostics)  sbatch "$HERE/resolution/run_resolution_diagnostics.sh" "$@" ;;
-  submit-resolution-experiment)   sbatch "$HERE/resolution/run_height_resolution_experiment.sh" "$@" ;;
-  submit-height-res-array)        sbatch "$HERE/resolution/height_res_array.sh" "$@" ;;
-  submit-plots)                   sbatch "$HERE/plots/run_plots.sh" "$@" ;;
-  progress)                       sh "$HERE/diagnostics/check_colonization_progress.sh" "$@" ;;
-  check-run)                      sh "$HERE/diagnostics/run_check_colonization_run.sh" "$@" ;;
+  submit-niches)                  sbatch "$(dirname "$HERE")/experiments/A02_niche_characterization/characterize_niches.sh" "$@" ;;
+  submit-resolution-diagnostics)  sbatch "$(dirname "$HERE")/experiments/A11_height_resolution/run_resolution_diagnostics.sh" "$@" ;;
+  submit-resolution-experiment)   sbatch "$(dirname "$HERE")/experiments/A11_height_resolution/run_height_resolution_experiment.sh" "$@" ;;
+  submit-height-res-array)        sbatch "$(dirname "$HERE")/experiments/A11_height_resolution/height_res_array.sh" "$@" ;;
+  submit-plots)                   sbatch "$(dirname "$HERE")/diagnostics/run_plots.sh" "$@" ;;
+  progress)                       sh "$(dirname "$HERE")/diagnostics/check_colonization_progress.sh" "$@" ;;
+  check-run)                      sh "$(dirname "$HERE")/diagnostics/run_check_colonization_run.sh" "$@" ;;
   help|-h|--help) usage ;;
   *) echo "Unknown subcommand: $CMD" >&2; usage; exit 1 ;;
 esac

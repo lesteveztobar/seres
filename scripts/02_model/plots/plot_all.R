@@ -4,7 +4,7 @@
 # pipeline — each function in plot_functions.R skips (with a message) if its
 # inputs aren't there yet, instead of erroring.
 #
-# Usage: sh scripts/02_model/plots/run_plots.sh   (wraps: Rscript scripts/02_model/plots/plot_all.R)
+# Usage: sh scripts/diagnostics/run_plots.sh   (wraps: Rscript scripts/02_model/plots/plot_all.R)
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 source("scripts/02_model/plots/plot_functions.R")
@@ -51,9 +51,6 @@ for (site in SITES) {
   safe_plot(paste("niche suitability", site), plot_niche_suitability(site, context = ctx))
   safe_plot(paste("niche profile curves", site), plot_niche_profile_curves(site, context = ctx))
 }
-
-cat("\n== Best-fit 3D comparison (simple model) ==\n")
-safe_plot("bestfit 3D comparison", plot_bestfit_3d_comparison())
 
 cat("\n== Colonization sensitivity experiments ==\n")
 for (site in SITES) {

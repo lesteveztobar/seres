@@ -17,7 +17,7 @@
 # same physical nodes (2TB each, sinfo) -- 1600G leaves ~400G headroom for
 # the OS/other jobs sharing the node rather than claiming the whole thing.
 #SBATCH --mem=1600G
-#SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_%j.out
+#SBATCH --output=/home/s38leste_hpc/seres/logs/log_%j.out
 
 module purge
 module load GCCcore/13.3.0
@@ -28,7 +28,7 @@ export LD_LIBRARY_PATH="/opt/software/easybuild-INTEL/software/PROJ/9.3.1-GCCcor
 unset PYTHONPATH
 export LD_PRELOAD="/home/s38leste_hpc/.conda/envs/canopy_rgee/lib/libcrypto.so.3:/home/s38leste_hpc/.conda/envs/canopy_rgee/lib/libssl.so.3"
 
-cd /home/$USER/canopymicroenv
+cd /home/$USER/seres
 
 SITE=$1      # e.g. "Maquipucuna"
 

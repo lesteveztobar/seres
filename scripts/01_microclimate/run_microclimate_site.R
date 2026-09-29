@@ -4,8 +4,19 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) == 0) stop("Usage: Rscript run_microclimate_site.R <SiteName> [n_months] [height_step]")
-TARGET_SITE <- args[1]
+if (length(args) == 0) stop("Usage: Rscript run_microclimate_site.R <SiteName>[,<SiteName>,...] [n_months] [height_step]")
+# 2026-09-06 (v7 3D re-run, Phase A): a comma-separated TARGET_SITE list
+# means "these sites share one raster domain" -- the Mindo-cluster case
+# (MindoMirador, MindoTarabita, Saloya, LaElenita: ~7-8km apart, existing
+# rasters already overlap 55-95%). One microclimf run, one set of forcing
+# data, one DTM; each listed site still gets its own manifest (below) and
+# its own per-pixel footprint within the shared output, so downstream code
+# addresses them exactly as it would separate single-site runs. This also
+# gives the 4 cluster sites identical forcing/model run by construction --
+# a deliberate secondary benefit (see the pricing report, Phase A3).
+CLUSTER_SITES <- strsplit(args[1], ",", fixed = TRUE)[[1]]
+IS_CLUSTER     <- length(CLUSTER_SITES) > 1L
+TARGET_SITE   <- if (IS_CLUSTER) paste0("MindoCluster_", paste(CLUSTER_SITES, collapse = "-")) else CLUSTER_SITES[1]
 N_MONTHS    <- if (length(args) >= 2) as.integer(args[2]) else 12L
 # Vertical spacing (m) between height tiers. Default 0.1 matches production
 # sites. A coarser step (e.g. 0.5) is for the height-resolution efficiency
@@ -43,7 +54,7 @@ terraOptions(tempdir = Sys.getenv("TMPDIR", unset = tempdir()))
 
 source("scripts/01_microclimate/lib.R")
 source("scripts/02_model/config/paths.R")
-source("scripts/00_data_conversion/helper_functions.R")
+source("scripts/data_prep/helper_functions.R")
 # .compute_voxel_quantiles() -- the per-pixel/month/daypart quantile
 # reduction applied to each height's output below, before it's written to
 # scratch. get_colonization.R has no top-level library()/source() calls of
@@ -53,10 +64,93 @@ source("scripts/02_model/engine/get_colonization.R")
 mycredentials <- readRDS(file.path(BASE_DIR, "credentials.rds"))
 cds_row <- mycredentials[mycredentials$Site == "CDS", ]
 ecmwfr::wf_set_key(key = cds_row$password, user = cds_row$username)
-sites         <- make_sites(OBSERVATIONS_CSV, pad = 0.15)
-site          <- sites[sites$Site == TARGET_SITE, ]
-if (nrow(site) == 0) stop(sprintf("Site '%s' not found in sites table.", TARGET_SITE))
-site <- split(site, seq_len(nrow(site)))[[1]]
+if (IS_CLUSTER) {
+  # Same summary make_sites() computes per site, but grouped across the
+  # whole cluster instead of by individual Area_or_Site -- i.e. one padded
+  # bounding box, one time window, spanning every listed site's
+  # observations. A3's coverage check (pricing report) confirmed this
+  # combined bbox, padded by the same 0.15 degrees make_sites() already
+  # uses, gives >=9km margin beyond the outermost site's own footprint --
+  # more than any single site's own domain currently gets, since the
+  # cluster's raw bbox is itself larger than any one site's.
+  df <- readr::read_csv(OBSERVATIONS_CSV, na = c("", "NA", "N/A"),
+                        col_types = COMBINED_COL_TYPES, show_col_types = FALSE) |>
+    dplyr::filter(!is.na(Source), !is.na(Area_or_Site), Area_or_Site %in% CLUSTER_SITES) |>
+    dplyr::filter(!is.na(lat), !is.na(lon), !is.na(datetime), !is.na(Height_m)) |>
+    dplyr::mutate(lat = as.numeric(lat), lon = as.numeric(lon),
+                  datetime = as.POSIXlt(datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"))
+  site <- data.frame(
+    Site        = TARGET_SITE,
+    lat_min     = min(df$lat) - 0.15, lat_max = max(df$lat) + 0.15,
+    lon_min     = min(df$lon) - 0.15, lon_max = max(df$lon) + 0.15,
+    tme_start   = min(df$datetime),   tme_end = max(df$datetime),
+    hObs_min    = min(df$Height_m, na.rm = TRUE), hObs_max = max(df$Height_m, na.rm = TRUE),
+    hCanopy_max = suppressWarnings({ v <- max(df$CanopyHeight_m, na.rm = TRUE); if (is.finite(v)) v else NA_real_ })
+  )
+  # Per-site (unpadded) observation bbox, for .site_footprint_pixels() below
+  # -- computed once here from the same filtered df, independent of the
+  # shared raster's own (padded) extent.
+  CLUSTER_SITE_BBOX <- lapply(CLUSTER_SITES, function(s) {
+    d <- df[df$Area_or_Site == s, ]
+    list(lat_range = range(d$lat), lon_range = range(d$lon))
+  })
+  names(CLUSTER_SITE_BBOX) <- CLUSTER_SITES
+  log_needed <- TRUE
+} else {
+  sites         <- make_sites(OBSERVATIONS_CSV, pad = 0.15)
+  site          <- sites[sites$Site == TARGET_SITE, ]
+  if (nrow(site) == 0) stop(sprintf("Site '%s' not found in sites table.", TARGET_SITE))
+  site <- split(site, seq_len(nrow(site)))[[1]]
+
+  # 2026-09-10: ERA5 grid-snap REMOVED. It shifted the model domain (up to
+  # 11.5 km) to guarantee >=2 ERA5 cell centres, but the terrain/vegetation
+  # rasters (get_dtm() etc.) load from a filename-keyed cache without
+  # checking the cached extent, so terrain stayed at the pre-snap bbox
+  # while ERA5 was pulled for the shifted domain -- ERA5 cells the snap
+  # added fell off the cached DTM, their point models came back NA, and
+  # microclimf's spatial run collapsed. All three snapped sites (Mindo
+  # Mirador 0.000, MindoTarabita 0.513, Saloya 0.550 finite temp fraction)
+  # were degraded; none of the three unsnapped sites were. The snap's own
+  # justification is also gone: the independent 12-timestep monthly
+  # validity check finds every candidate ERA5 cell valid at every site, so
+  # the "1 valid cell" problem the snap solved was an artifact of
+  # microclimf::runpointmodela()'s hour-1-only test, not real.
+  #
+  # Domain is now just the raw-observation bounding box + the fixed 0.15deg
+  # buffer from make_sites() -- deterministic, reproducible, centred on the
+  # site. A site whose domain falls within a single ERA5 cell is fine: all
+  # horizontal microclimatic variation in the model derives from terrain
+  # and canopy structure (microclimf), not the weather forcing.
+  # `snap` is kept as a null-op record so the manifest field
+  # (.era5_grid_snap) and any code testing exists(snap) still resolve.
+  snap <- list(lat_min = site$lat_min, lat_max = site$lat_max,
+               lon_min = site$lon_min, lon_max = site$lon_max,
+               era5_grid_snap = list(axis = "none", shift_deg = 0, shift_km = 0,
+                                     removed = TRUE))
+  message(sprintf("Domain for %s: raw obs bbox + 0.15deg buffer (no ERA5 grid snap). lat [%.4f, %.4f] lon [%.4f, %.4f]",
+                  TARGET_SITE, site$lat_min, site$lat_max, site$lon_min, site$lon_max))
+  # CANOPY_GRIDORIGIN_OFFSET_M: retained diagnostic hook only (grid-origin
+  # sensitivity test); unset in every normal run.
+  test_offset_m <- as.numeric(Sys.getenv("CANOPY_GRIDORIGIN_OFFSET_M", unset = "0"))
+  if (test_offset_m != 0) {
+    d_lat <- test_offset_m / 111320
+    d_lon <- test_offset_m / (111320 * cos(mean(c(site$lat_min, site$lat_max)) * pi / 180))
+    site$lat_min <- site$lat_min + d_lat; site$lat_max <- site$lat_max + d_lat
+    site$lon_min <- site$lon_min + d_lon; site$lon_max <- site$lon_max + d_lon
+    message(sprintf("GRID-ORIGIN SENSITIVITY TEST: additional offset of %.1fm applied (lat+%.6fdeg, lon+%.6fdeg)",
+                    test_offset_m, d_lat, d_lon))
+  }
+  # site$lat_min/lat_max etc. are already padded by 0.15deg (make_sites()) --
+  # that's the RASTER domain, not the landscape footprint. Recompute the
+  # site's own unpadded observation bbox directly, so solo-site and
+  # cluster-site runs feed .site_footprint_pixels() the same kind of input.
+  df1 <- readr::read_csv(OBSERVATIONS_CSV, na = c("", "NA", "N/A"),
+                         col_types = COMBINED_COL_TYPES, show_col_types = FALSE) |>
+    dplyr::filter(!is.na(Source), Area_or_Site == TARGET_SITE,
+                  !is.na(lat), !is.na(lon), !is.na(datetime), !is.na(Height_m)) |>
+    dplyr::mutate(lat = as.numeric(lat), lon = as.numeric(lon))
+  CLUSTER_SITE_BBOX <- setNames(list(list(lat_range = range(df1$lat), lon_range = range(df1$lon))), TARGET_SITE)
+}
 
 ee$Initialize(project = "ee-lizethestevezt")
 
@@ -84,6 +178,9 @@ for (d in c(site_dir, site_dtm_dir, site_soil_dir,
 # so production (0.1m) runs keep their original, unsuffixed file names and
 # coarser diagnostic runs never collide with or overwrite them.
 res_suffix      <- if (HEIGHT_STEP != 0.1) sprintf("_h%.2f", HEIGHT_STEP) else ""
+if (exists("test_offset_m") && test_offset_m != 0) {
+  res_suffix <- sprintf("%s_gridoffset%.0fm", res_suffix, test_offset_m)
+}
 site_env_path   <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site$Site, res_suffix))
 site_model_path <- file.path(PROCESSED_DIR, sprintf("pointmodel_%s.rds", site$Site))
 
@@ -124,6 +221,34 @@ log_msg("Acquiring weather data...")
 weatherdata <- get_weather(site = site, credentials = mycredentials,
                            r = raster, tme = tme, dir = site_era5_dir, output = "grid")
 
+# 2026-09-08: independent, our-own-code validity check -- microclimf's own
+# per-cell test (runpointmodela(), quoted in docs/methods_update_report.md)
+# only inspects the FIRST hourly timestep (`climdf$temp[1]`), so a cell with
+# one missing hour at the very start of the series is discarded even if the
+# rest of its year is fine, and (the opposite, more dangerous failure) a
+# cell fine at hour 1 but gappy afterward passes silently. This samples one
+# timestep per month (12 total) and requires ALL of them finite -- a
+# tougher, more representative bar, computed independently of and BEFORE
+# runpointmodela() is ever called, so it never depends on or patches that
+# package internal. Logged as a cross-check; N_VALID_ERA5_CELLS (below,
+# microclimf's own hour-1 count) is still what actually gates which cells
+# feed the model, per the decision not to patch runmicro()/runpointmodela().
+# get_weather(..., output="grid") returns wrapped (PackedSpatRaster)
+# components for safe cross-process return -- unwrap before any terra::
+# call, same pattern this script already uses for dtmdata_w/dtmc_w below.
+weatherdata_temp <- if (inherits(weatherdata$temp, "PackedSpatRaster")) terra::unwrap(weatherdata$temp) else weatherdata$temp
+ERA5_GRID_NROW <- terra::nrow(weatherdata_temp)
+ERA5_GRID_NCOL <- terra::ncol(weatherdata_temp)
+n_time_avail <- terra::nlyr(weatherdata_temp)
+month_sample_idx <- unique(round(seq(1, n_time_avail, length.out = 12)))
+temp_monthly_samples <- terra::values(weatherdata_temp[[month_sample_idx]])
+valid_monthly <- apply(temp_monthly_samples, 1, function(x) all(is.finite(x)))
+N_VALID_ERA5_CELLS_MONTHLY <- sum(valid_monthly)
+N_TOTAL_ERA5_CELLS_MONTHLY <- length(valid_monthly)
+log_msg(sprintf(
+  "Valid grid cells (monthly-sampled, %d timesteps across the year, ALL must be finite): %d / %d",
+  length(month_sample_idx), N_VALID_ERA5_CELLS_MONTHLY, N_TOTAL_ERA5_CELLS_MONTHLY))
+
 log_msg("Acquiring DTM...")
 dtmdata <- get_dtm(r = raster, dir = site_dtm_dir, mask = FALSE)
 
@@ -135,6 +260,33 @@ laidata <- get_lai(r = raster, tme = tme, pathout = site_lai_dir, credentials = 
 
 log_msg("Acquiring albedo...")
 albedodata <- get_albedo(r = raster, tme = tme, pathout = site_alb_dir, credentials = mycredentials)
+
+# ── Terrain-coverage assertion (2026-09-10) ──────────────────────────────
+# Every acquired terrain/vegetation raster MUST enclose the requested model
+# domain. Before the .cache_covers() guard (lib.R), a filename-keyed cache
+# could silently return terrain for an earlier, different domain while ERA5
+# was re-pulled for the current one -- MindoMirador's microclimate
+# collapsed exactly this way. Fail loudly here, at build time.
+.req_ext <- as.vector(terra::ext(raster))
+.assert_covers <- function(x, name, hard = FALSE) {
+  ce <- as.vector(terra::ext(x)); tol <- 0.003
+  m_s <- (ce[3] - .req_ext[3]) * 111.32
+  m_n <- (.req_ext[4] - ce[4]) * -111.32
+  m_w <- (ce[1] - .req_ext[1]) * 111.32
+  m_e <- (.req_ext[2] - ce[2]) * -111.32
+  log_msg(sprintf("  terrain coverage %-9s: gap S/N/W/E from domain edge = %+.2f / %+.2f / %+.2f / %+.2f km (negative = raster extends past domain)",
+                  name, m_s, m_n, m_w, m_e))
+  short <- ce[1] > .req_ext[1] + tol || ce[2] < .req_ext[2] - tol ||
+           ce[3] > .req_ext[3] + tol || ce[4] < .req_ext[4] - tol
+  if (short) {
+    msg <- sprintf("%s raster [%.4f,%.4f,%.4f,%.4f] does NOT enclose the model domain [%.4f,%.4f,%.4f,%.4f] -- stale cache (see .cache_covers()).",
+                   name, ce[1], ce[2], ce[3], ce[4], .req_ext[1], .req_ext[2], .req_ext[3], .req_ext[4])
+    if (hard) stop(msg) else log_msg(paste("  WARN:", msg))
+  }
+}
+.assert_covers(dtmdata, "DTM", hard = TRUE)
+.assert_covers(landcoverdata, "landcover")
+.assert_covers(laidata, "LAI")
 
 landcover_dtm <- terra::resample(landcoverdata, dtmdata, method = "near")
 
@@ -182,13 +334,56 @@ if (file.exists(site_model_path) && !model_is_stale) {
 
 # runpointmodela returns NA for cells where the model fails (e.g. ocean/masked
 # cells). runmicro iterates weather[[k]] up to length(dtmc) — the ERA5 cell
-# count — so the model list must stay that length. Replace NA cells with a copy
-# of the first valid cell; their spatial output is masked/unused anyway.
+# count — so the model list must stay that length.
+#
+# 2026-09-08: substitution changed from "copy the first valid cell" (scan-
+# order in runpointmodela()'s own i,j loop -- row-major, so effectively
+# "the northernmost, then westernmost valid cell", with no geographic
+# relationship to the masked cell it's filling in for) to "copy the
+# NEAREST valid cell" (Euclidean distance in grid-index space -- ERA5 cells
+# are on a uniform grid, so index distance is proportional to physical
+# distance). The old comment here claimed masked cells' spatial output is
+# "masked/unused anyway" -- disproven directly: MindoMirador's 2026-09-07
+# re-run (1 valid ERA5 cell) produced a per-pixel array 99.97% NA, i.e. the
+# substituted values clearly DO reach and dominate the final per-pixel
+# climate output, not just fill in something later discarded. With the
+# ERA5 grid-snap (era5_grid_snap(), lib.R) now deliberately choosing a
+# domain's shift DIRECTION by a geometric rule (not geography), "first in
+# scan order" would have made which cell's weather ends up governing most
+# of a domain's masked area depend on which direction the snap happened to
+# shift it -- an artifact of the fix itself, not a real forcing difference
+# between sites. Nearest-valid substitution removes that dependency: for
+# every masked cell, whichever valid cell is geographically closest to IT
+# specifically is used, not whichever was scanned first.
 n_before  <- length(model)
-valid_mp  <- Filter(function(x) inherits(x, "micropoint"), model)
-if (length(valid_mp) == 0) stop("All grid cells failed in runpointmodela — check ERA5 coverage and LSM.")
-model <- lapply(model, function(x) if (inherits(x, "micropoint")) x else valid_mp[[1]])
-log_msg(sprintf("Valid grid cells: %d / %d", length(valid_mp), n_before))
+valid_idx <- which(vapply(model, inherits, logical(1), "micropoint"))
+if (length(valid_idx) == 0) stop("All grid cells failed in runpointmodela — check ERA5 coverage and LSM.")
+# k = (i-1)*ncol + j (row-major, matching runpointmodela()'s own i,j loop
+# order) -> recover each cell's (row, col) grid position.
+.k_to_rc <- function(k, ncol) c(row = ((k - 1L) %/% ncol) + 1L, col = ((k - 1L) %% ncol) + 1L)
+valid_rc <- t(vapply(valid_idx, .k_to_rc, numeric(2), ncol = ERA5_GRID_NCOL))
+model <- lapply(seq_along(model), function(k) {
+  if (inherits(model[[k]], "micropoint")) return(model[[k]])
+  rc <- .k_to_rc(k, ERA5_GRID_NCOL)
+  d2 <- (valid_rc[, "row"] - rc[["row"]])^2 + (valid_rc[, "col"] - rc[["col"]])^2
+  model[[valid_idx[which.min(d2)]]]
+})
+log_msg(sprintf("Valid grid cells: %d / %d (masked cells filled from their own nearest valid cell, not scan-order-first)", length(valid_idx), n_before))
+# 2026-09-08: persisted into the manifest below (N_VALID_ERA5_CELLS/
+# N_TOTAL_ERA5_CELLS), not just this log line -- sanity_gate.R's new (g)/(h)
+# checks need this as a structural fact they can assert on, not something
+# that only ever existed as text in a log file. See runpointmodela()
+# (microclimf) for exactly what makes a cell "valid": per its own source,
+# a cell is valid iff its first ERA5 hourly temperature reading is not NA
+# AND the vegetation-height raster (resampled to the ERA5 grid) is not NA
+# at that cell -- checked only at the FIRST timestep, not the whole series.
+N_VALID_ERA5_CELLS <- length(valid_idx)
+N_TOTAL_ERA5_CELLS <- n_before
+if (N_VALID_ERA5_CELLS != N_VALID_ERA5_CELLS_MONTHLY) {
+  log_msg(sprintf(
+    "NOTE: hour-1-only valid count (%d) differs from monthly-sampled count (%d) -- the hour-1 test missed a temporally-gappy cell, or discarded one only briefly missing at hour 1.",
+    N_VALID_ERA5_CELLS, N_VALID_ERA5_CELLS_MONTHLY))
+}
 
 # ── 2b. Temporal subsample before grid expansion ─────────────────────────────
 # The per-height grid expansion is O(pixels x timesteps); the point model
@@ -250,6 +445,23 @@ era5_template <- terra::rast(weatherdata[[1]])[[1]]
 dtmc          <- terra::resample(dtmdata, era5_template, method = "bilinear")
 dtmdata_w     <- terra::wrap(dtmdata)
 dtmc_w        <- terra::wrap(dtmc)
+
+# v7 3D re-run (Phase A1): per-site footprint pixel indices within THIS
+# run's raster (shared across all CLUSTER_SITES for a cluster run, or just
+# TARGET_SITE itself for a solo run) -- built once here from dtmdata's own
+# extent/dims, reused by every height tier's .compute_pixel_means() call
+# below. Uses .site_footprint_pixels()/.lonlat_to_pixel() from
+# get_colonization.R (already sourced above).
+sp_spatial_run <- list(
+  ext  = as.vector(terra::ext(dtmdata)),
+  nrow = terra::nrow(dtmdata),
+  ncol = terra::ncol(dtmdata)
+)
+site_footprints <- lapply(CLUSTER_SITE_BBOX, function(bb)
+  .site_footprint_pixels(bb$lat_range, bb$lon_range, sp_spatial_run))
+log_msg(sprintf("Per-pixel-mean footprints (this run's %dx%d raster): %s",
+  sp_spatial_run$nrow, sp_spatial_run$ncol,
+  paste(sprintf("%s=%d px", names(site_footprints), lengths(site_footprints)), collapse = ", ")))
 
 n_cores   <- max(1L, as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = detectCores() - 1L)))
 n_heights <- length(heights)
@@ -343,10 +555,19 @@ log_msg(sprintf("Launching parallel height loop: %d heights on %d cores...", n_h
     nr <- terra::nrow(dtm_)
     nc <- terra::ncol(dtm_)
     voxel_quantiles <- .compute_voxel_quantiles(mout, nr, nc)
+    # v7 3D re-run (Phase A1): per-pixel MEANS (not quantiles -- no
+    # quantile-to-mean estimator anywhere in this pipeline, per the
+    # decision), restricted to each named site's own small footprint
+    # (site_footprints, built once above) rather than the whole raster.
+    # This is the input the 3D demographic core (Phase B) will read; the
+    # existing voxel_quantiles above is untouched and keeps feeding the
+    # niche-establishment system exactly as before.
+    pixel_means <- .compute_pixel_means(mout, nr, nc, site_footprints)
     saveRDS(
       list(
         tme             = mout$tme,
         voxel_quantiles = voxel_quantiles,
+        pixel_means     = pixel_means,
         # 2026-08-10: apply(arr, 3, mean, na.rm=TRUE) -> matrixStats::
         # colMeans2() on the same (npix, ntime) reshape .compute_voxel_
         # quantiles() already uses -- verified numerically identical
@@ -374,9 +595,16 @@ log_msg(sprintf("Launching parallel height loop: %d heights on %d cores...", n_h
   result
 }
 
+# Which of `heights` already has its .rds file on disk right now -- shared
+# by the main pass, the retry pass, and the retry's own completion check
+# below, which previously recomputed this file.exists() lookup 3x verbatim.
+.height_rds_exists <- function(height_dir, heights) {
+  file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights)))
+}
+
 results <- mclapply(seq_along(heights), .run_height, mc.cores = n_cores)
 
-heights_ok <- heights[file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights)))]
+heights_ok <- heights[.height_rds_exists(height_dir, heights)]
 n_done <- length(heights_ok)
 log_msg(sprintf("Height loop done: %d/%d complete.", n_done, n_heights))
 
@@ -386,12 +614,12 @@ log_msg(sprintf("Height loop done: %d/%d complete.", n_done, n_heights))
 # silently dropped Maquipucuna's heights 17-76 on 2026-08-09) isn't just
 # immediately reproduced at the same concurrency that caused it.
 if (n_done < n_heights) {
-  missing_idx <- which(!file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights))))
+  missing_idx <- which(!.height_rds_exists(height_dir, heights))
   retry_cores <- max(1L, n_cores %/% 2L)
   log_msg(sprintf("Retrying %d/%d failed heights on %d core(s)...",
                    length(missing_idx), n_heights, retry_cores))
   retry_results <- mclapply(missing_idx, .run_height, mc.cores = retry_cores)
-  heights_ok <- heights[file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights)))]
+  heights_ok <- heights[.height_rds_exists(height_dir, heights)]
   n_done <- length(heights_ok)
   log_msg(sprintf("Retry done: %d/%d complete overall.", n_done, n_heights))
 }
@@ -449,8 +677,40 @@ manifest <- list(
   # day for the grid expansion. Downstream precip/winddir
   # (get_colonization.R:240, lookup_climate_by_height()) needs the
   # complete hourly series.
-  .weather    = weather_full
+  .weather    = weather_full,
+  .era5_grid_snap = if (exists("snap")) snap$era5_grid_snap else NULL,
+  .n_valid_era5_cells = N_VALID_ERA5_CELLS,
+  .n_valid_era5_cells_monthly = N_VALID_ERA5_CELLS_MONTHLY,
+  .n_total_era5_cells = N_TOTAL_ERA5_CELLS
 )
 saveRDS(manifest, site_env_path)
 log_msg(sprintf("Manifest saved to %s  (height_dir=%s)", site_env_path, height_dir))
+
+# v7 3D re-run (Phase A1): also save one manifest PER REAL SITE NAME (not
+# just the combined TARGET_SITE, which for a cluster run is a synthetic
+# "MindoCluster_..." label) -- same shared .heights/.height_dir/.spatial/
+# .weather (the 4 cluster sites deliberately share identical forcing, see
+# above), plus this site's own footprint pixel indices so
+# build_clim_cache()/build_clim_cache_voxel() can find exactly its own
+# pixels inside the shared height files. Existing code that loads
+# `microenv_<SiteName>.rds` by name (get_colonization.R's load_height() and
+# everything built on it) needs no changes for this to work -- it just
+# starts finding a real file where before (for the 3 satellite cluster
+# sites) there wasn't one from this run.
+if (IS_CLUSTER) {
+  for (real_site in CLUSTER_SITES) {
+    real_manifest <- manifest
+    real_manifest$.footprint_idx <- site_footprints[[real_site]]
+    real_manifest$.site_name     <- real_site
+    real_manifest$.cluster_of    <- setdiff(CLUSTER_SITES, real_site)
+    real_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", real_site, res_suffix))
+    saveRDS(real_manifest, real_path)
+    log_msg(sprintf("Cluster member manifest saved: %s (%d footprint px, shared height_dir)",
+                    real_path, length(site_footprints[[real_site]])))
+  }
+} else {
+  manifest$.footprint_idx <- site_footprints[[TARGET_SITE]]
+  manifest$.site_name     <- TARGET_SITE
+  saveRDS(manifest, site_env_path)
+}
 log_msg("Done. Height files remain in scratch — do not ws_release until downstream analysis is complete.")

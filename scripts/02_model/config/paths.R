@@ -1,12 +1,12 @@
 # paths.R
-# Project directory constants for canopymicroenv
+# Project directory constants for seres
 # All paths derived from BASE_DIR — change only BASE_DIR if project moves
 # Per-site subdirectories (era5, dtm, soil, etc.) are built dynamically
 # inside the site loop in getmicroenv.R using BASE_DIR as the root
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 
-BASE_DIR <- "/home/s38leste_hpc/canopymicroenv"
+BASE_DIR <- "/home/s38leste_hpc/seres"
 
 # data
 RAW_DIR <- file.path(BASE_DIR, "data", "raw")
@@ -22,7 +22,7 @@ PARAMS_DIR <- file.path(BASE_DIR, "data", "params")
 # without editing R source. Default switched from combinedv3.csv to
 # combined_with_identification.csv on 2026-07-24, once the latter had all
 # seven sites (post rebuild_combined_csv.py LaElenita/MindoMirador/Saloya
-# split -- see scripts/00_data_conversion/rebuild_combined_csv.py) and combinedv3.csv did not.
+# split -- see scripts/data_prep/rebuild_combined_csv.py) and combinedv3.csv did not.
 #
 # 2026-08-28: briefly pointed straight at combinedv6.csv, then reverted --
 # Saloya's still-pending OAT-chain jobs (27169761-27169766) each freshly
@@ -34,9 +34,22 @@ PARAMS_DIR <- file.path(BASE_DIR, "data", "params")
 # CANOPY_OBS_CSV override explicitly instead (see run_colonization_v6.sh /
 # any v6-tagged submission), leaving this default -- and every currently
 # in-flight job -- untouched.
-OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV",
-  unset = file.path(CSV_DIR, "combined_with_identification.csv")
-)
+# 2026-09-06 (v7 rebuild, CORRECTED): a deprecation COMMENT does not stop a
+# script that forgets to set CANOPY_OBS_CSV from silently resolving to the
+# old, pre-v7-schema file (combined_with_identification.csv -- fewer
+# columns, an explicit FinalID column rather than one derived from
+# Identification, missing every v7 fix applied to combinedv6.csv). A
+# comment is not a control; this is not a silent behaviour change, it is
+# the removal of one that was already silently possible. No unset default
+# at all now -- any script that reaches this line without CANOPY_OBS_CSV
+# set stops immediately with a message naming the file to use.
+OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV", unset = NA_character_)
+if (is.na(OBSERVATIONS_CSV)) {
+  stop("CANOPY_OBS_CSV is not set. This pipeline no longer has a silent ",
+       "default observations CSV (removed 2026-09-06 -- see paths.R). ",
+       "Set CANOPY_OBS_CSV=data/csv/combinedv6.csv (the current v7 dataset) ",
+       "explicitly before sourcing paths.R.")
+}
 
 # Loads OBSERVATIONS_CSV and populates FinalID from Identification
 # (2026-07-24: combined_with_identification.csv leaves FinalID entirely
@@ -57,11 +70,27 @@ OBSERVATIONS_CSV <- Sys.getenv("CANOPY_OBS_CSV",
 # instead of relying on this fallback.
 load_observations <- function(path = OBSERVATIONS_CSV) {
   niches <- read.csv(path)
+  # 2026-08-29/30: Maxillariinae scope filter (.filter_maxillariinae(),
+  # shared_helpers.R) -- renames synonym genera to their accepted name, then
+  # drops any row whose genus isn't Maxillariinae, AND (2026-08-30) drops
+  # any row with no Identification at all. Must run first, directly on the
+  # raw Identification column, before FinalID is even derived from it --
+  # every downstream consumer (characterize_niches.R, every site/species
+  # helper added this session) needs to see already-scoped, already-renamed
+  # data with no fabricated placeholder species in it.
+  #
+  # The blank-ID-defaults-to-"Maxillaria acutifolia" fallback that used to
+  # live here is REMOVED (2026-08-30, explicit decision) -- it fabricated a
+  # specific species identity for an individual nobody actually identified,
+  # which is exactly what let unidentified-heavy sites (LaElenita/
+  # MindoMirador/Saloya) silently borrow OTHER sites' real acutifolia niche
+  # evidence in earlier suitability figures. Every row reaching this point
+  # now has a genuine, in-scope Identification -- FinalID is just a direct
+  # copy of it, no defaulting left to do.
   if ("Identification" %in% names(niches)) {
+    niches <- .filter_maxillariinae(niches)
     niches$FinalID <- niches$Identification
   }
-  needs_default <- is.na(niches$FinalID) | !nzchar(trimws(niches$FinalID))
-  niches$FinalID[needs_default] <- "Maxillaria acutifolia"
   niches
 }
 
@@ -111,4 +140,45 @@ MODEL_TESTS_DIR <- file.path(MODEL_DIR, "tests")
 # not runtime output, so they are intentionally excluded from auto-creation.
 for (d in c(RAW_DIR, CSV_DIR, PROCESSED_DIR, PARAMS_DIR, SCRIPTS_DIR, OUTPUT_DIR, LOGS_DIR)) {
   dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Analysis-ID-aware output path helper (added 2026-09-29, repo reorg pass).
+# Opt-in only: with CANOPY_OUTPUT_ROOT unset, this is a strict no-op that
+# returns `legacy_path` unchanged -- every caller's current hardcoded path
+# is untouched unless a run explicitly opts in. Setting CANOPY_OUTPUT_ROOT
+# routes output to <root>/by_analysis/<analysis_id>/<state>/<filename>
+# instead, creating the directory on demand and never silently overwriting
+# an existing file there (a numeric suffix is appended and a warning
+# printed, rather than clobbering it -- same hazard this file's
+# NICHE_CACHE_PATH/OBSERVATIONS_CSV comments already describe for in-flight
+# jobs reading a path fresh at their own start).
+resolve_output_path <- function(analysis_id, filename, legacy_path, state = "current") {
+  output_root <- Sys.getenv("CANOPY_OUTPUT_ROOT", unset = NA_character_)
+  if (is.na(output_root)) {
+    return(legacy_path)
+  }
+  dest_dir <- file.path(output_root, "by_analysis", analysis_id, state)
+  dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
+  dest_path <- file.path(dest_dir, filename)
+  if (!file.exists(dest_path)) {
+    return(dest_path)
+  }
+  ext <- tools::file_ext(filename)
+  base <- tools::file_path_sans_ext(filename)
+  suffix <- 1
+  repeat {
+    candidate <- if (nzchar(ext)) {
+      file.path(dest_dir, sprintf("%s_%d.%s", base, suffix, ext))
+    } else {
+      file.path(dest_dir, sprintf("%s_%d", base, suffix))
+    }
+    if (!file.exists(candidate)) {
+      warning(sprintf(
+        "resolve_output_path(): %s already exists, writing to %s instead",
+        dest_path, candidate
+      ))
+      return(candidate)
+    }
+    suffix <- suffix + 1
+  }
 }
