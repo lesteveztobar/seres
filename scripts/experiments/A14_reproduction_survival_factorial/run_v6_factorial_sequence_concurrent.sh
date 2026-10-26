@@ -42,7 +42,7 @@ export CANOPY_NICHE_CACHE=data/processed/species_niches_v6.rds
 export CANOPY_NICHE_BACKGROUND=data/processed/niche_background_density_v6.rds
 
 mapfile -t SITES < <(awk -F, 'NR>1 && $2!="" {print $2}' "$CANOPY_OBS_CSV" | sort -u)
-# Drop Saloya -- see batch_exp.sh's matching 2026-08-28 exclusion.
+# Drop Saloya -- matching its 2026-08-28 exclusion from the sensitivity experiments.
 SITES=("${SITES[@]/Saloya}")
 SITES=($(printf '%s\n' "${SITES[@]}" | grep -v '^$'))
 HEIGHT_STEP=${HEIGHT_STEP:-0.4}

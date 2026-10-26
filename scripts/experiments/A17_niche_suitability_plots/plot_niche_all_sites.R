@@ -4,8 +4,8 @@
 #
 #   niche_suitability_by_site.png               Fig A  (main, quantitative)
 #   niche_forest_all_sites.png                  Fig B  (visual abstract)
-#   niche_suitability_by_site_rescale.png       supp   (ceiling-rescale effect)
-#   niche_suitability_by_site_morphospecies.png supp   (unidentified sp.)
+#   niche_suitability_by_site_species.png       curves for M. discolor, acutifolia, amplifoliata
+#   niche_suitability_by_site_morphospecies.png curves for morphospecies
 #   niche_multisite_species.png                 supp   (species at 2+ sites)
 #
 # Split out of plot_new_figures.R (which also sources this, so the two never
@@ -41,10 +41,10 @@ source("scripts/02_model/plots/plot_functions.R")
     plot_niche_suitability_by_site(built = niche_built))
   safe_plot("niche forest (Fig B)",
     plot_niche_forest(built = niche_built))
-  safe_plot("niche rescale comparison (supp)",
-    plot_niche_suitability_by_site(built = niche_built, stages = c("before", "after")))
-  safe_plot("niche morphospecies (supp)",
-    plot_niche_suitability_by_site(built = niche_built, confirmed_only = FALSE))
+  safe_plot("niche curves focal species",
+    plot_niche_species_curves(built = niche_built))
+  safe_plot("niche curves morphospecies",
+    plot_niche_morphospecies_curves(built = niche_built))
   safe_plot("niche multi-site species (supp)",
     plot_niche_multisite_species(built = niche_built))
 

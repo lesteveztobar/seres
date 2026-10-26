@@ -34,6 +34,7 @@ module load UDUNITS/2.2.28-GCCcore-13.2.0
 export LD_LIBRARY_PATH="/opt/software/easybuild-INTEL/software/PROJ/9.3.1-GCCcore-13.2.0/lib:/opt/software/easybuild-INTEL/software/GDAL/3.9.0-foss-2023b/lib:/opt/software/easybuild-INTEL/software/GEOS/3.12.1-GCC-13.2.0/lib:$LD_LIBRARY_PATH"
 
 cd /home/$USER/seres
-echo "CANOPY_OBS_CSV=${CANOPY_OBS_CSV:-<paths.R default>}"
+export CANOPY_OBS_CSV="${CANOPY_OBS_CSV:-data/csv/combinedv6.csv}"
+echo "CANOPY_OBS_CSV=${CANOPY_OBS_CSV}"
 echo "CANOPY_NICHE_CACHE=${CANOPY_NICHE_CACHE:-<paths.R default>}"
 Rscript scripts/experiments/A17_niche_suitability_plots/plot_niche_all_sites.R

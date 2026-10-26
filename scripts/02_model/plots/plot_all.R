@@ -15,7 +15,8 @@ source("scripts/02_model/plots/plot_functions.R")
 .plot_all_niches <- load_observations()
 SITES <- sort(unique(.plot_all_niches$Area_or_Site[
   !is.na(.plot_all_niches$Area_or_Site) & nzchar(.plot_all_niches$Area_or_Site)]))
-EXP   <- names(EXP_PARAM_MAP)
+# Result files carry the production height-spacing suffix (_h0.40).
+EXP   <- paste0(names(EXP_PARAM_MAP), "_h0.40")
 
 # Wraps a single plotting call so one function's runtime error doesn't halt
 # the rest of the script. plot_functions.R's own functions already skip
@@ -59,33 +60,19 @@ for (site in SITES) {
   }
 }
 
-cat("\n== Reproduction factorial (p_poll x p_germ x p_s1 x n_founders) ==\n")
-# reproduction_factorial_v3: levels bracketed realistic.rds -> best_case.rds
-# (see report/methods.tex, Full factorial experiment). Loops every site now
-# that more than just Maquipucuna has a result -- plot_factorial_experiment()
-# already skips gracefully for any site that doesn't have one yet.
-for (site in SITES) {
-  safe_plot(paste("factorial", site), plot_factorial_experiment(site, "reproduction_factorial_v3_h0.40"))
-}
+# 2026-10-01: the reproduction_factorial_v3 section (pre-v7 model only,
+# deleted with data/processed/archive_pre_v7), the "default" unswept-run
+# section (no colonization_<site>_default.rds has existed since the
+# per-experiment naming scheme) and the realistic_273founders runs
+# (replaced by realistic_75founders, see make_params.R) were removed.
+# The current factorial is A14's reproduction_survival_seed_v7_reduced.
 
-cat("\n== Default (unswept) colonization runs ==\n")
-for (site in SITES) {
-  safe_plot(paste("default run", site), plot_default_colonization_run(site))
-}
-
-cat("\n== Persistence validation runs (best-case / realistic / realistic_273founders) ==\n")
-# Loops every site -- plot_default_colonization_run() already skips
-# gracefully for any site/tag combination without a result yet (e.g.
-# MiradorMindo/Yanayacu's best_case_h0.25, which crashed on 0/5 replicates --
-# see project memory on the 2026-07-16 NA-propagation investigation, still
-# open). realistic_273founders_h0.25 is the run_full_analysis_pipeline.R
-# rerun (2026-07-18) -- see its header note on why 273 founders instead of
-# realistic.rds's literature-default 30.
+cat("\n== Persistence validation runs (best-case / realistic) ==\n")
+# Loops every site -- plot_default_colonization_run() skips gracefully for
+# any site/tag combination without a result yet.
 for (site in SITES) {
   safe_plot(paste("best_case", site), plot_default_colonization_run(site, exp_tag = "best_case_h0.40"))
   safe_plot(paste("realistic", site), plot_default_colonization_run(site, exp_tag = "realistic_h0.40"))
-  safe_plot(paste("realistic_273founders", site),
-            plot_default_colonization_run(site, exp_tag = "realistic_273founders_h0.40"))
 }
 
 cat("\nAll done. Plots (where inputs existed) are in", OUTPUT_DIR, "\n")

@@ -77,32 +77,28 @@ scripts/
                    (unmoved); per-experiment plotting lives under
                    experiments/A17_niche_suitability_plots/ instead
     analysis/, setup/, diagnostics/   small residue still pending manual
-                   placement (see docs/orchestrator/2026-09-29/PHASE2_PLAN.csv,
-                   category UNCLEAR) -- everything else that used to live
+                   placement -- everything else that used to live
                    here has moved to diagnostics/ or experiments/ below
   diagnostics/    ad hoc checks and one-off investigations, not part of the
                    main pipeline (consolidated from what used to be spread
                    across 01_microclimate/, 02_model/{analysis,diagnostics,
-                   setup}, and 03_orchestration/); includes the archived
-                   archive_carcap_investigation_2026-09/ unit and
+                   setup}, and 03_orchestration/); includes
                    make_params.R (parameter-table generation)
   experiments/    one directory per named evaluation experiment (A02-A19;
                    see "Experiments" below), each holding that experiment's
                    driving script(s) and its own run_*.sh submission wrapper
   03_orchestration/  pipeline-level SLURM launchers:
-                       run_overnight_20260929.sh, the current full re-run
+                       run_full_rerun.sh, the current full re-run
                        launcher written against the new layout, plus two
                        earlier launchers still pending manual placement
-                       (run_downstream_launcher.sh, run_phase_f_approved.sh)
+                       (run_downstream_launcher.sh, run_phase_f_approved.sh),
+                       and run_height_res_remaining.sh (finishes A11)
   tests/          smoke tests and format checks
 ```
 
 The repository was reorganized on 2026-09-29 (scripts regrouped from a
 numbered-stage layout into `data_prep/`, `diagnostics/`, and
-per-experiment `experiments/A**` directories); see
-`docs/orchestrator/2026-09-29/SESSION_REPORT.md` and
-`docs/orchestrator/2026-09-29/PHASE2_PLAN.csv` for the full rationale and
-the handful of files still flagged for manual review.
+per-experiment `experiments/A**` directories).
 
 `report/`, `docs/`, `output/`, and the contents of `data/` are excluded
 from version control (see `.gitignore`), so the paths this README cites
@@ -116,13 +112,13 @@ on; scripts are run via `Rscript` or submitted to a SLURM cluster.
 
 - **Single site, single configuration**: `Rscript
   scripts/02_model/run/run_colonization.R <site> [params_file]`.
-- **All sites, one experiment, on a cluster**: `scripts/02_model/run/
-  batch_exp.sh` (SLURM array over sites) or `scripts/02_model/run/
-  run_colonization.sh` (single-job submission wrapper).
+- **One site, one experiment, on a cluster**: `scripts/02_model/run/
+  run_colonization.sh` (single-job submission wrapper; also reachable as
+  `scripts/02_model/run.sh submit-colonization`).
 - **The full re-run** (carrying-capacity calibration gate, then
   every experiment below, the sensitivity design, results manifest, plots
   and thesis PDF, chained by SLURM dependencies): `bash
-  scripts/03_orchestration/run_overnight_20260929.sh` from the repository
+  scripts/03_orchestration/run_full_rerun.sh` from the repository
   root. It only submits jobs, so it is safe to start from a login node.
 - **Outputs** land in `data/processed/` (`.rds` run output,
   `microenv_<site>*.rds` climate manifests, `species_niches*.rds` niche
@@ -167,7 +163,7 @@ themselves are built by `scripts/diagnostics/make_params.R`. Broadly:
   germination probability are declared modelling assumptions, not
   empirical estimates, and are swept across at least an order of
   magnitude in the sensitivity designs for that reason. The sensitivity
-  design itself lives in `scripts/experiments/A05_sensitivity_v8/`: a
+  design itself lives in `scripts/experiments/A05_sensitivity/`: a
   Latin hypercube over the ranges in `data/params/sensitivity_ranges_<tag>.csv`
   (`build_lhs_design.R`, needs the `lhs` package), run through
   `sensitivity_run.R`, and analysed with PAWN indices, standardised

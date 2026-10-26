@@ -1821,6 +1821,10 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   if (is.null(params$delta_s_base)) params$delta_s_base <- 0.80
   if (is.null(params$cost_repro)) params$cost_repro <- 0.50
 
+  dz_step <- if (length(heights) > 1L) stats::median(diff(heights)) else 0.40
+  maxDispZ_m <- if (!is.null(params$maxDispZ_m)) as.numeric(params$maxDispZ_m) else 2.0
+  maxDispZ <- if (!is.null(params$maxDispZ)) as.integer(params$maxDispZ) else max(1L, as.integer(round(maxDispZ_m / dz_step)))
+
   list(
     site_name = site_name,
     site_obs = site_obs,
@@ -1844,6 +1848,8 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
     params = params,
     carCap = carCap,
     maxDisp = maxDisp,
+    maxDispZ = maxDispZ,
+    maxDispZ_m = maxDispZ_m,
     dispersalmatrix = array(0L, dim = c(
       xDim + 2 * maxDisp,
       yDim + 2 * maxDisp,
@@ -1905,7 +1911,9 @@ run_pass1_disperse <- function(state, abundanceA, size_A, t, stochastic = FALSE)
         clim = state$clim_by_height[[z]],
         height = state$heights[z], canopy_z = p$canopy_z,
         a = p$a, lambda = p$lambda, Ut = p$Ut,
-        maxDisp = state$maxDisp, Disp = Disp[, , , sp],
+        maxDisp = state$maxDisp,
+        maxDispZ = if (!is.null(state$maxDispZ)) state$maxDispZ else 5L,
+        Disp = Disp[, , , sp],
         wind_override = wind_here
       )
     }

@@ -16,7 +16,7 @@ export CANOPY_OBS_CSV=data/csv/combinedv6.csv
 # Saloya left out for now (few observations: 17 raw / 5 identified); set SKIP_SITES="" to include it.
 export SKIP_SITES="${SKIP_SITES-Saloya}"
 export CANOPY_SKIP_SITES="$SKIP_SITES"
-D=scripts/experiments/A05_sensitivity_v8
+D=scripts/experiments/A05_sensitivity
 MAP=logs/downstream_$(date +%Y%m%d_%H%M%S).jobs; : > $MAP
 sub() { local name=$1; shift; local id; id=$(sbatch --parsable "$@"); echo "$name: $id" | tee -a $MAP; }
 arr() { # name design outdir ntasks

@@ -109,8 +109,12 @@ summary_row <- data.frame(site = site_name, n_pixels = length(vals),
                            max_hgt = max(vals))
 dir.create("output", showWarnings = FALSE)
 out_csv <- "output/vhgt_site_summary_tight.csv"
-if (file.exists(out_csv)) {
-  prior <- read.csv(out_csv)
+# organize_output.sh moves vhgt_* tables to output/tables/climate/; append to
+# that copy if there is no fresh top-level one, so earlier sites aren't lost.
+prior_csv <- c(out_csv, "output/tables/climate/vhgt_site_summary_tight.csv")
+prior_csv <- prior_csv[file.exists(prior_csv)][1]
+if (!is.na(prior_csv)) {
+  prior <- read.csv(prior_csv)
   prior <- prior[prior$site != site_name, ]
   summary_row <- rbind(prior, summary_row)
 }

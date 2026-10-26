@@ -10,7 +10,16 @@ source("scripts/02_model/config/paths.R")
 args <- commandArgs(trailingOnly = TRUE)
 binning <- if (length(args) >= 1) args[1] else "relative_decile"
 
-d <- read.csv(file.path(OUTPUT_DIR, "climate_decoupling_by_height_band.csv"), stringsAsFactors = FALSE)
+# climate_decoupling.R writes to output/; organize_output.sh later moves
+# climate_* / footprint_* tables to output/tables/climate/. Read whichever
+# exists, preferring a fresh top-level copy.
+climate_table <- function(name) {
+  cand <- file.path(OUTPUT_DIR, c(name, file.path("tables", "climate", name)))
+  hit <- cand[file.exists(cand)]
+  if (length(hit)) hit[1] else cand[1]
+}
+
+d <- read.csv(climate_table("climate_decoupling_by_height_band.csv"), stringsAsFactors = FALSE)
 d <- d[d$binning == binning, ]
 if (!nrow(d)) stop("No rows for binning '", binning, "'")
 
@@ -22,7 +31,7 @@ band_labels <- sub(",", "–", band_labels)
 d$band <- factor(d$height_band, levels = band_levels, labels = band_labels)
 
 # Sites low -> high elevation (bottom -> top); sites without a footprint elevation go last.
-elev_path <- file.path(OUTPUT_DIR, "footprint_elevation.csv")
+elev_path <- climate_table("footprint_elevation.csv")
 elev <- if (file.exists(elev_path)) read.csv(elev_path, stringsAsFactors = FALSE) else data.frame(site = character(), elev_mean = numeric())
 sites <- unique(d$site)
 e <- elev$elev_mean[match(sites, elev$site)]

@@ -432,7 +432,7 @@ saveRDS(params_survivalfactorial_v5, out_path)
 # range (max level's mean final-year total abundance minus min level's,
 # marginalizing the other swept params) as a fraction of the max level's
 # abundance, per site, then averaged across all 5 sites
-# (scripts/diagnostics/archive_carcap_investigation_2026-09/v6_param_selection.R):
+# (v6_param_selection.R, since removed):
 #   v4: n_founders 0.843, p_s1 0.030, p_germ 0.027, p_poll 0.024 (5 sites' individual
 #       rankings for the bottom 3 are inconsistent site-to-site -- this is a
 #       genuinely thin margin, not a strong signal; n_founders dominates

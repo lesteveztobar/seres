@@ -108,7 +108,7 @@ summarize_one <- function(in_path, label) {
 }
 
 cat("\n\n========================================\n")
-cat("Persistence validation (best_case / realistic / realistic_273founders)\n")
+cat("Persistence validation (best_case / realistic)\n")
 cat("========================================\n")
 any_persistence <- FALSE
 for (site in SITES) {
@@ -116,30 +116,12 @@ for (site in SITES) {
                        sprintf("%s / best_case", site))
   ok2 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_h0.40.rds", site)),
                        sprintf("%s / realistic", site))
-  ok3 <- summarize_one(file.path(PROCESSED_DIR, sprintf("colonization_%s_realistic_273founders_h0.40.rds", site)),
-                       sprintf("%s / realistic_273founders", site))
-  any_persistence <- any_persistence || isTRUE(ok1) || isTRUE(ok2) || isTRUE(ok3)
+  any_persistence <- any_persistence || isTRUE(ok1) || isTRUE(ok2)
 }
 if (!any_persistence) cat("(no persistence validation results yet)\n")
 
-cat("\n\n========================================\n")
-cat("Reproduction factorial (v3)\n")
-cat("========================================\n")
-any_factorial <- FALSE
-for (site in SITES) {
-  final_path <- file.path(PROCESSED_DIR,
-    sprintf("colonization_%s_reproduction_factorial_v3_h0.40.rds", site))
-  ckpt_path <- file.path(PROCESSED_DIR,
-    sprintf("colonization_%s_reproduction_factorial_v3_h0.40_checkpoint.rds", site))
-
-  if (file.exists(final_path)) {
-    ok <- summarize_one(final_path, sprintf("%s / reproduction_factorial_v3", site))
-    any_factorial <- any_factorial || isTRUE(ok)
-  } else if (file.exists(ckpt_path)) {
-    summarize_one(ckpt_path, sprintf("%s / reproduction_factorial_v3 (INCOMPLETE -- checkpoint only, rerun to resume)", site))
-    any_factorial <- TRUE
-  }
-}
-if (!any_factorial) cat("(no factorial results yet)\n")
+# 2026-10-01: the "Reproduction factorial (v3)" section was removed -- that
+# design only ran on the pre-v7 model (deleted with archive_pre_v7); the
+# 273-founder persistence runs were replaced by realistic_75founders.
 
 cat("\nDone.\n")

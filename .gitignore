@@ -16,11 +16,7 @@ figures/*
 # --- Logs and temporary files ---
 *.log
 *.tmp
-logs/*.out
-logs/*.err
-logs/*.jobs
-logs/*.txt
-logs/older_than_1_week/
+/logs/
 scripts/03_orchestration/logs/
 scripts/tests/test_log/
 scripts/tests/test_results/
@@ -38,12 +34,7 @@ credentials.rds
 *.DS_Store
 **/.DS_Store
 
-# --- Keep folder structure ---
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/params/.gitkeep
-!output/.gitkeep
-!figures/.gitkeep
+# --- Editor ---
 .positai
 
 # --- Sync artifacts ---
@@ -63,9 +54,13 @@ scripts/simple_colonization.R
 # --- Params files ---
 data/params/*
 
+# --- Field observation data (precise GPS of orchid records; never commit) ---
+/geojson_to_csv/
+
 # --- Report ---
-report
-docs
+/report
+/docs
+/manuscript for paper
 
 # --- Literature ---
 data/literature

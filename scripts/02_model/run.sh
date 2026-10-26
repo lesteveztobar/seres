@@ -27,10 +27,6 @@ SLURM submission (pass-through to sbatch; each script keeps its own
   submit-colonization SITE [PARAMS] [EXPTAG] [HEIGHT_STEP] [SPECIES_FILE]
       sbatch run_colonization.sh -- one site x one experiment.
 
-  submit-batch-exp
-      sbatch batch_exp.sh -- regenerates params, then submits the full
-      sites x experiments matrix (many submit-colonization jobs).
-
   submit-niches [HEIGHT_STEP]
       sbatch characterize_niches.sh (default height_step=0.4).
 
@@ -64,7 +60,6 @@ CMD="$1"; shift
 
 case "$CMD" in
   submit-colonization)            sbatch "$HERE/run/run_colonization.sh" "$@" ;;
-  submit-batch-exp)               sbatch "$HERE/run/batch_exp.sh" "$@" ;;
   submit-niches)                  sbatch "$(dirname "$HERE")/experiments/A02_niche_characterization/characterize_niches.sh" "$@" ;;
   submit-resolution-diagnostics)  sbatch "$(dirname "$HERE")/experiments/A11_height_resolution/run_resolution_diagnostics.sh" "$@" ;;
   submit-resolution-experiment)   sbatch "$(dirname "$HERE")/experiments/A11_height_resolution/run_height_resolution_experiment.sh" "$@" ;;

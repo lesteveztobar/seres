@@ -1,6 +1,7 @@
 #!/bin/bash
 # run_colonization.sh — run colonization model for a single site × experiment
-# Called by batch_exp.sh; do not submit directly.
+# Submitted per site x experiment by the experiment launchers under
+# scripts/experiments/ and by `scripts/02_model/run.sh submit-colonization`.
 #
 #SBATCH --partition=lm_short
 #SBATCH --account=ag_biob_scabral

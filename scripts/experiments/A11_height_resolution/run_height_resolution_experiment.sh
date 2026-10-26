@@ -31,8 +31,9 @@ module load R/4.4.2-gfbf-2024a
 
 cd /home/$USER/seres
 
-SITE=${1:?"Usage: sbatch run_height_resolution_experiment.sh <site> [height_steps] [params_file]"}
+SITE=${1:?"Usage: sbatch run_height_resolution_experiment.sh <site> [height_steps] [params_file] [out_suffix]"}
 HEIGHT_STEPS=$2
 PARAMS_FILE=$3
+OUT_SUFFIX=$4
 
-Rscript scripts/experiments/A11_height_resolution/height_resolution_experiment.R "$SITE" "$HEIGHT_STEPS" "$PARAMS_FILE"
+Rscript scripts/experiments/A11_height_resolution/height_resolution_experiment.R "$SITE" "$HEIGHT_STEPS" "$PARAMS_FILE" "$OUT_SUFFIX"

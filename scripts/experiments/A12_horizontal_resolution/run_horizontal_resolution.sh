@@ -19,7 +19,7 @@ fi
 # horizontal_resolution.rds (10 reps) is kept on disk as the manual,
 # NOT-auto-scheduled follow-up if this first pass's pooled/voxel effect
 # turns out close to the noise floor (median 3.0%/p90 5.2% CV in the
-# bounded regime, report/evaluation.tex) and worth resolving more precisely.
+# bounded regime, report/results.tex) and worth resolving more precisely.
 PARAMS="data/params/realistic_75founders.rds"
 
 mkdir -p logs

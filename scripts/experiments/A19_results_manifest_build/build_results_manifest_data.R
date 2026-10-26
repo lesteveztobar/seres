@@ -5,8 +5,7 @@ source("scripts/02_model/config/paths.R")
 
 SITES <- c("Maquipucuna", "Mashpi", "Yanayacu", "MindoMirador", "MindoTarabita", "Saloya")
 EXP_TAGS <- c("best_case", "realistic", "founder_number",
-             "horizontal_resolution_pooled", "horizontal_resolution_voxel",
-             "realistic_273founders")
+             "horizontal_resolution_pooled", "horizontal_resolution_voxel")
 
 extract_stats <- function(result) {
   if (is.null(result) || is.null(result$summary)) return(NULL)

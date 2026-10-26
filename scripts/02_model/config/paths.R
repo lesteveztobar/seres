@@ -119,19 +119,17 @@ OUTPUT_DIR <- file.path(BASE_DIR, "output")
 LOGS_DIR <- file.path(BASE_DIR, "logs")
 
 # 02_model subdirectories — mirrors the current scripts/02_model/ layout
-# (analysis, config, diagnostics, engine, plots, resolution, run, setup,
-# tests). Update here if that layout changes rather than hardcoding
-# sub-paths at each call site.
+# (analysis, config, engine, plots, run, setup; diagnostics/, resolution/
+# and tests/ were folded into scripts/diagnostics and scripts/experiments in
+# the 2026-09-29 reorg). Update here if that layout changes rather than
+# hardcoding sub-paths at each call site.
 MODEL_DIR <- file.path(SCRIPTS_DIR, "02_model")
 MODEL_ANALYSIS_DIR <- file.path(MODEL_DIR, "analysis")
 MODEL_CONFIG_DIR <- file.path(MODEL_DIR, "config")
-MODEL_DIAGNOSTICS_DIR <- file.path(MODEL_DIR, "diagnostics")
 MODEL_ENGINE_DIR <- file.path(MODEL_DIR, "engine")
 MODEL_PLOTS_DIR <- file.path(MODEL_DIR, "plots")
-MODEL_RESOLUTION_DIR <- file.path(MODEL_DIR, "resolution")
 MODEL_RUN_DIR <- file.path(MODEL_DIR, "run")
 MODEL_SETUP_DIR <- file.path(MODEL_DIR, "setup")
-MODEL_TESTS_DIR <- file.path(MODEL_DIR, "tests")
 
 # create all directories if they don't exist
 # showWarnings = FALSE silently skips dirs that already exist

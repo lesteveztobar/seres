@@ -46,10 +46,12 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # from 3 separate locations (LaElenita, MindoMirador, Saloya), now split
   # into their own GeoJSON exports (see scripts/data_prep/rebuild_combined_csv.py).
   # Left on disk as an audit trail but no longer read here.
-  # Saloya excluded from this map (2026-08-29, matches batch_exp.sh's
-  # 2026-08-28 exclusion from the colonization sensitivity experiments) --
-  # this figure is meant to show the sites the model was actually run at.
+  # Saloya restored 2026-10-03: it is a modelled site in every experiment
+  # (the 2026-08-29 exclusion reflected a sensitivity run that no longer
+  # applies). Colours come from the shared SERES palette so the map matches
+  # every results figure.
   geojson_files <- c(
+    Saloya        = "Saloya.geojson",
     Maquipucuna   = "Maquipucuna.geojson",
     Mashpi        = "Mashpi.geojson",
     MindoTarabita = "MindoTarabita.geojson",   # merged with TarabitaMindo below
@@ -76,6 +78,9 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # site's label is therefore positioned from its points' own centroid;
   # the transect-vs-point label-source split this used to need is gone.
   obs_points <- all_features %>% filter(sf::st_geometry_type(geometry) == "POINT")
+  # 2026-10-03: hard guarantee that every site, Saloya included, is drawn.
+  missing_sites <- setdiff(c(names(geojson_files)[names(geojson_files) != "TarabitaMindo"]), unique(obs_points$site))
+  if (length(missing_sites)) stop("plot_site_map(): no observation points for ", paste(missing_sites, collapse = ", "))
 
   site_labels <- obs_points %>%
     group_by(site) %>%
@@ -88,11 +93,11 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # map.
   label_nudges <- data.frame(
     site    = c("Mashpi", "Maquipucuna", "MindoTarabita", "Yanayacu",
-                "LaElenita", "MindoMirador"),
+                "LaElenita", "MindoMirador", "Saloya"),
     nudge_x = c( 0.00,     0.08,          0.15,            0.10,
-                 0.00,      0.00),
+                 0.00,      0.00,          0.00),
     nudge_y = c(-0.04,     0.07,         -0.05,            0.06,
-                 0.00,      0.00)
+                 0.00,      0.00,          0.00)
   )
   label_pos <- site_labels |>
     dplyr::mutate(X = sf::st_coordinates(geometry)[, 1],
@@ -111,10 +116,11 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   xlim <- c(bbox["xmin"] - 0.30, bbox["xmax"] + 0.55)  # extra east for Yanayacu
   ylim <- c(bbox["ymin"] - 0.40, bbox["ymax"] + 0.30)
 
-  site_colours <- setNames(
-    scico::scico(6, palette = "lipari", begin = 0.10, end = 0.88),
-    c("Maquipucuna", "Mashpi", "MindoTarabita", "LaElenita", "MindoMirador", "Yanayacu")
-  )
+  source(file.path(BASE_DIR, "scripts", "99_shared", "seres_palette.R"), local = TRUE)
+  site_colours <- SITE_COL
+  site_breaks  <- intersect(SITE_LEVELS, unique(obs_points$site))
+  site_legend  <- setNames(ifelse(site_breaks == "Yanayacu", "Yanayacu (eastern-slope outgroup)", site_breaks),
+                           site_breaks)
 
   # ── Mindo cluster inset ───────────────────────────────────────────────────
   # MindoTarabita / LaElenita / MindoMirador fall within ~7 km of each other
@@ -123,7 +129,7 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # read separately, and outline the same extent on the main map so the reader
   # can locate it. Inset labels are placed from each site's own point centroid
   # (the regional `label_nudges` are far too large for this ~3 km window).
-  mindo_sites  <- c("MindoTarabita", "LaElenita", "MindoMirador")
+  mindo_sites  <- c("MindoTarabita", "LaElenita", "MindoMirador", "Saloya")
   mindo_points <- obs_points %>% filter(site %in% mindo_sites)
   mindo_bbox   <- sf::st_bbox(mindo_points)
   # Zoom extent: pad in y, then set x from the box centre to whatever half-width
@@ -131,41 +137,49 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # sliver -- ~2 km E-W vs ~7 km N-S -- and would render as an unreadable
   # ribbon at equal scale).
   pad_y      <- max(as.numeric(mindo_bbox["ymax"] - mindo_bbox["ymin"]) * 0.28, 0.006)
-  mindo_cx   <- mean(c(mindo_bbox["xmin"], mindo_bbox["xmax"]))
   half_y     <- as.numeric(mindo_bbox["ymax"] - mindo_bbox["ymin"]) / 2 + pad_y
-  half_x     <- half_y * 1.4
+  half_x     <- half_y * 1.80
+  mindo_cx   <- mean(c(mindo_bbox["xmin"], mindo_bbox["xmax"])) + 0.025
   mindo_xlim <- c(mindo_cx - half_x, mindo_cx + half_x)
   mindo_ylim <- c(mindo_bbox["ymin"] - pad_y, mindo_bbox["ymax"] + pad_y)
 
-  mindo_labels <- site_labels %>%
-    dplyr::filter(site %in% mindo_sites) %>%
-    dplyr::mutate(X = sf::st_coordinates(geometry)[, 1],
-                  Y = sf::st_coordinates(geometry)[, 2]) %>%
-    sf::st_drop_geometry() %>%
+  # Inset labels: anchor each site cleanly to its point cluster.
+  # Saloya's main cluster (14 of 15 observations) sits at northwest
+  # (-78.8242, 0.0142), so we anchor there and offset left with sufficient
+  # whitespace to prevent overlapping any points. MindoMirador and MindoTarabita
+  # offset right and now have ample margin inside the widened inset box.
+  mindo_labels <- data.frame(
+    site      = c("Saloya",   "LaElenita", "MindoMirador", "MindoTarabita"),
+    X         = c(-78.82424,  -78.77592,   -78.76167,      -78.76190),
+    Y         = c(  0.01422,   -0.02027,    -0.02175,       -0.08249),
+    lab_hjust = c(1,          1,           0,               0),
+    dx        = c(-0.025,     -0.012,       0.010,           0.010),
+    dy        = c( 0.000,      0.000,       0.000,           0.000)
+  ) %>%
     dplyr::mutate(
-      lab_hjust = dplyr::if_else(site == "LaElenita", 1, 0),
-      X_lab     = X + dplyr::if_else(site == "LaElenita", -half_x * 0.05, half_x * 0.05)
+      X_lab = X + dx,
+      Y_lab = Y + dy
     )
 
   p_inset <- ggplot() +
     geom_sf(data = map_area, fill = "#f5f0e8", colour = "grey55", linewidth = 0.3) +
-    geom_sf(data = mindo_points, aes(colour = site), size = 2.6, alpha = 0.9,
-            shape = 16, show.legend = FALSE) +
+    geom_sf(data = mindo_points, aes(fill = site), size = 2.6, shape = 21,
+            colour = "grey20", stroke = 0.3, show.legend = FALSE) +
     geom_text(data = mindo_labels,
-              aes(x = X_lab, y = Y, label = site, colour = site, hjust = lab_hjust),
-              size = 2.3, fontface = "bold", show.legend = FALSE) +
-    scale_colour_manual(values = site_colours) +
+              aes(x = X_lab, y = Y_lab, label = site, hjust = lab_hjust),
+              colour = "grey15", size = 2.4 + 1.2 / .pt, fontface = "bold", show.legend = FALSE) +
+    scale_fill_manual(values = site_colours) +
     coord_sf(xlim = mindo_xlim, ylim = mindo_ylim, expand = FALSE) +
     annotation_scale(location = "br", width_hint = 0.3,
-                     height = unit(0.1, "cm"), text_cex = 0.55,
+                     height = unit(0.1, "cm"), text_cex = 0.55 + 2 / 12,
                      pad_x = unit(0.1, "cm"), pad_y = unit(0.1, "cm")) +
     labs(title = "Mindo sites (zoom)") +
-    theme_bw(base_size = 8) +
+    theme_bw(base_size = 10) +
     theme(
       axis.title       = element_blank(),
       axis.text        = element_blank(),
       axis.ticks       = element_blank(),
-      plot.title       = element_text(size = 7.5, face = "bold"),
+      plot.title       = element_text(size = 9.5, face = "bold"),
       plot.background  = element_rect(fill = "white", colour = "grey30", linewidth = 0.6),
       plot.margin      = margin(3, 3, 3, 3),
       panel.grid       = element_blank()
@@ -175,28 +189,31 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
   # MindoTarabita at this scale -- the inset carries them, so the main map
   # just points to it.
   main_labels <- label_pos %>%
-    dplyr::filter(!site %in% c("LaElenita", "MindoMirador")) %>%
-    dplyr::mutate(lab = dplyr::if_else(site == "MindoTarabita",
-                                       "Mindo sites (see inset)", site))
+    dplyr::filter(!site %in% c("LaElenita", "MindoMirador", "Saloya")) %>%
+    dplyr::mutate(lab = dplyr::case_when(site == "MindoTarabita" ~ "Mindo sites (see inset)",
+                                         site == "Yanayacu" ~ "Yanayacu\n(eastern-slope outgroup)",
+                                         TRUE ~ site))
 
   p <- ggplot() +
     geom_sf(data = map_area, fill = "#f5f0e8", colour = "grey55", linewidth = 0.35) +
-    geom_sf(data = obs_points, aes(colour = site), size = 1.8, alpha = 0.55, shape = 16) +
+    geom_sf(data = obs_points, aes(fill = site), size = 2.0, shape = 21,
+            colour = "grey20", stroke = 0.3) +
     annotate("rect", xmin = mindo_xlim[1], xmax = mindo_xlim[2],
              ymin = mindo_ylim[1], ymax = mindo_ylim[2],
              fill = NA, colour = "grey30", linewidth = 0.5) +
-    geom_text(data = main_labels, aes(x = X, y = Y, label = lab, colour = site),
-              size = 3, fontface = "bold", show.legend = FALSE) +
-    scale_colour_manual(values = site_colours, name = "Site") +
+    geom_text(data = main_labels, aes(x = X, y = Y, label = lab),
+              colour = "grey15", size = 3 + 2 / .pt, fontface = "bold", lineheight = 0.9, show.legend = FALSE) +
+    scale_fill_manual(values = site_colours, breaks = site_breaks, labels = site_legend, name = "Site") +
     coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
-    annotation_scale(location = "br", width_hint = 0.25) +
+    annotation_scale(location = "br", width_hint = 0.25, text_cex = 0.7 + 2 / 12) +
     annotation_north_arrow(
       location = "tr", style = north_arrow_fancy_orienteering(),
       height = unit(1.2, "cm"), width = unit(1.2, "cm")
     ) +
-    labs(title = "Field sites", subtitle = "NW Ecuador · Chocó Andino ",
+    labs(title = "Field sites",
+         subtitle = "Western slope: Chocó Andino, NW Ecuador · Eastern slope: Yanayacu (outgroup)",
          x = "Longitude", y = "Latitude") +
-    theme_bw(base_size = 12) +
+    theme_bw(base_size = 14) +
     theme(
       legend.position  = "right",
       panel.grid.major = element_line(colour = "grey85", linewidth = 0.3),
@@ -205,12 +222,12 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
     )
 
   p <- p + patchwork::inset_element(
-    p_inset, left = 0.015, bottom = 0.02, right = 0.42, top = 0.44,
+    p_inset, left = 0.015, bottom = 0.02, right = 0.45, top = 0.44,
     align_to = "panel"
   )
 
   out_path <- file.path(out_dir, "site_map.png")
-  ggsave(out_path, plot = p, width = 10, height = 8, dpi = 300, bg = "white")
+  ggsave(out_path, plot = p, width = 10, height = 5.5, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
 }
@@ -460,16 +477,16 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
 }
 
 # ── Colonization sensitivity-experiment sweeps ──────────────────────────────────
-# One RDS per site x experiment tag, produced by run_colonization.R
-# via batch_exp.sh. This mapping must stay in sync with the EXP/PARAMS
-# pairing in scripts/batch_exp.sh.
+# One RDS per site x experiment tag, produced by run_colonization.R. Only
+# experiments with current-model results are mapped here (see the
+# 2026-10-01 note below).
+# 2026-10-01: the one-at-a-time sweeps (pollination_success,
+# adult_survival_intercept, germination_probability, reproduction_cost,
+# climate_sensitivity_rh, precipitation_sensitivity) only ever ran on the
+# pre-v7 model and were deleted with data/processed/archive_pre_v7; their
+# role is taken by the global sensitivity design (A05). founder_number is the
+# only swept-parameter experiment with current-model results.
 EXP_PARAM_MAP <- c(
-  pollination_success       = "p_poll",
-  adult_survival_intercept  = "beta0A",
-  germination_probability   = "p_germ",
-  reproduction_cost         = "cost_repro",
-  climate_sensitivity_rh    = "beta_rh",
-  precipitation_sensitivity = "beta_precip",
   founder_number            = "n_founders"
 )
 
@@ -492,7 +509,10 @@ plot_colonization_experiment <- function(site_name, exp_tag, out_dir = OUTPUT_DI
     return(invisible(NULL))
   }
 
-  param_name <- EXP_PARAM_MAP[[exp_tag]] %||% exp_tag
+  # exp_tag may carry the height-spacing suffix of the result file
+  # (e.g. "founder_number_h0.40"); the parameter map is keyed without it.
+  base_tag <- sub("_h[0-9.]+$", "", exp_tag)
+  param_name <- if (base_tag %in% names(EXP_PARAM_MAP)) EXP_PARAM_MAP[[base_tag]] else exp_tag
   p <- plot_experiment(result, param_name,
                        title = sprintf("Effect of %s — %s", param_name, site_name))
 
@@ -1358,6 +1378,115 @@ plot_niche_multisite_species <- function(sites = NULL, out_dir = OUTPUT_DIR,
   h <- max(3.5, 1.2 + ceiling(n_sp / ncol_f) * (0.5 + 0.42 * n_site))
   out_path <- file.path(out_dir, "niche_multisite_species.png")
   ggsave(out_path, plot = p, width = w, height = h, dpi = 300, bg = "white", limitsize = FALSE)
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Curves: specific identified species (M. discolor, acutifolia, amplifoliata) ─
+plot_niche_species_curves <- function(built = NULL, out_dir = OUTPUT_DIR,
+                                      focal_species = c("Maxillaria discolor", "Maxillaria acutifolia", "Maxillaria amplifoliata")) {
+  built <- built %||% .niche_score_rows_all_sites_cached()
+  rows <- built$rows
+  if (is.null(rows) || nrow(rows) == 0) return(invisible(NULL))
+
+  source(file.path(BASE_DIR, "scripts", "99_shared", "seres_palette.R"), local = TRUE)
+  source(file.path(BASE_DIR, "scripts", "04_results_figures", "fig_common.R"), local = TRUE)
+
+  df <- data.frame(site = as.character(rows$site), species = as.character(rows$species),
+                   height = rows$height, score = rows$after)
+  df <- df[is.finite(df$score) & df$species %in% focal_species, ]
+
+  SMOOTH_M <- 2.0; PEAK_MIN <- 5
+  df <- do.call(rbind, lapply(split(df, list(df$site, df$species), drop = TRUE), function(d) {
+    d <- d[order(d$height), ]
+    d$smooth <- vapply(d$height, function(h) mean(d$score[abs(d$height - h) <= SMOOTH_M / 2 + 1e-9]), numeric(1))
+    d
+  }))
+  pk <- do.call(rbind, lapply(split(df, list(df$site, df$species), drop = TRUE), function(d) d[which.max(d$smooth), ]))
+  pk <- pk[pk$smooth >= PEAK_MIN, ]
+
+  lev <- unique(taxon_expr(focal_species, abbreviate = TRUE))
+  df$species <- factor(taxon_expr(df$species, abbreviate = TRUE), levels = lev)
+  pk$species <- factor(taxon_expr(pk$species, abbreviate = TRUE), levels = lev)
+  df$site <- factor(df$site, levels = intersect(SITE_LEVELS, df$site))
+  pk$site <- factor(pk$site, levels = levels(df$site))
+
+  p <- ggplot(df, aes(x = height, y = smooth, colour = site)) +
+    geom_line(linewidth = 0.6) +
+    geom_segment(data = pk, aes(x = height, xend = height, y = 0, yend = smooth),
+                 linetype = "dotted", linewidth = 0.3) +
+    geom_point(data = pk, aes(fill = site), shape = 21, colour = "black", size = 2.0, stroke = STROKE_W) +
+    scale_colour_manual(values = SITE_COL[levels(df$site)], name = "Site") +
+    scale_fill_manual(values = SITE_COL[levels(df$site)], guide = "none") +
+    scale_y_continuous(limits = c(0, 100), breaks = c(0, 50, 100)) +
+    facet_wrap(~species, ncol = 3, labeller = label_parsed) +
+    labs(x = "Height above ground (m)", y = "Climate-niche suitability (0–100)") +
+    theme_seres() +
+    theme(strip.text = element_text(size = 10.5), legend.position = "bottom",
+          panel.spacing = unit(3, "mm"))
+
+  target_dir <- if (grepl("figures/niche/?$", out_dir)) out_dir
+                else if (dir.exists(file.path(out_dir, "figures", "niche"))) file.path(out_dir, "figures", "niche")
+                else file.path(out_dir, "niche")
+  dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
+  out_path <- file.path(target_dir, "niche_suitability_by_site_species.png")
+  ggsave(out_path, plot = p, width = 175, height = 65, units = "mm", dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Curves: informal morphospecies ───────────────────────────────────────────
+plot_niche_morphospecies_curves <- function(built = NULL, out_dir = OUTPUT_DIR) {
+  built <- built %||% .niche_score_rows_all_sites_cached()
+  rows <- built$rows
+  if (is.null(rows) || nrow(rows) == 0) return(invisible(NULL))
+
+  source(file.path(BASE_DIR, "scripts", "99_shared", "seres_palette.R"), local = TRUE)
+  source(file.path(BASE_DIR, "scripts", "04_results_figures", "fig_common.R"), local = TRUE)
+
+  is_conf <- .niche_is_confirmed(rows$species)
+  rows <- rows[!is_conf, , drop = FALSE]
+
+  df <- data.frame(site = as.character(rows$site), species = as.character(rows$species),
+                   height = rows$height, score = rows$after)
+  df <- df[is.finite(df$score), ]
+
+  SMOOTH_M <- 2.0; PEAK_MIN <- 5
+  df <- do.call(rbind, lapply(split(df, list(df$site, df$species), drop = TRUE), function(d) {
+    d <- d[order(d$height), ]
+    d$smooth <- vapply(d$height, function(h) mean(d$score[abs(d$height - h) <= SMOOTH_M / 2 + 1e-9]), numeric(1))
+    d
+  }))
+  pk <- do.call(rbind, lapply(split(df, list(df$site, df$species), drop = TRUE), function(d) d[which.max(d$smooth), ]))
+  pk <- pk[pk$smooth >= PEAK_MIN, ]
+
+  sp_order <- .niche_species_order(rows)
+  lev <- unique(taxon_expr(sp_order, abbreviate = TRUE))
+  df$species <- factor(taxon_expr(df$species, abbreviate = TRUE), levels = lev)
+  pk$species <- factor(taxon_expr(pk$species, abbreviate = TRUE), levels = lev)
+  df$site <- factor(df$site, levels = intersect(SITE_LEVELS, df$site))
+  pk$site <- factor(pk$site, levels = levels(df$site))
+
+  p <- ggplot(df, aes(x = height, y = smooth, colour = site)) +
+    geom_line(linewidth = 0.6) +
+    geom_segment(data = pk, aes(x = height, xend = height, y = 0, yend = smooth),
+                 linetype = "dotted", linewidth = 0.3) +
+    geom_point(data = pk, aes(fill = site), shape = 21, colour = "black", size = 1.6, stroke = STROKE_W) +
+    scale_colour_manual(values = SITE_COL[levels(df$site)], name = "Site") +
+    scale_fill_manual(values = SITE_COL[levels(df$site)], guide = "none") +
+    scale_y_continuous(limits = c(0, 100), breaks = c(0, 50, 100)) +
+    facet_wrap(~species, ncol = 4, labeller = label_parsed) +
+    labs(x = "Height above ground (m)", y = "Climate-niche suitability (0–100)") +
+    theme_seres() +
+    theme(strip.text = element_text(size = 9.0), legend.position = "bottom",
+          panel.spacing = unit(3, "mm"))
+
+  target_dir <- if (grepl("figures/niche/?$", out_dir)) out_dir
+                else if (dir.exists(file.path(out_dir, "figures", "niche"))) file.path(out_dir, "figures", "niche")
+                else file.path(out_dir, "niche")
+  dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
+  out_path <- file.path(target_dir, "niche_suitability_by_site_morphospecies.png")
+  ggsave(out_path, plot = p, width = 180, height = 100, units = "mm", dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
 }

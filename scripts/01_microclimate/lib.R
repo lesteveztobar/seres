@@ -2,7 +2,7 @@
 # Merged from get_climateinputs.R (ERA5/DTM/LAI/albedo/vegetation/soil acquisition)
 # and get_microenv.R (niche extraction, canopy grid, climate lookups).
 # Sourced together by run_microclimate.R, run_microclimate_site.R,
-# regenerate_missing_dtm.R, and scripts/legacy/allsites.R.
+# and regenerate_missing_dtm.R.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Worker logging ────────────────────────────────────────────────────────────
@@ -587,7 +587,11 @@ get_dtm <- function(r, dir, mask = FALSE) {
   # dem_download resamples to the template raster, so a 2×2 template gives a
   # 2×2 DTM. Instead, build a ~90m resolution UTM template to get a usable DEM,
   # then reproject to WGS84. EPSG:32717 = UTM zone 17S covers western Ecuador.
-  e_wgs <- terra::ext(r)
+  # 2026-10-02: +0.01deg (~1.1 km) pad. The UTM 90 m template and the
+  # reprojection back to WGS84 trim the edges, so an unpadded download came
+  # back ~0.5 km short of the domain (Mashpi E/S edges) and failed
+  # .assert_covers() even freshly downloaded. Values are unchanged; only coverage.
+  e_wgs <- terra::ext(r) + 0.01
   r_utm <- terra::project(terra::rast(e_wgs, crs = "EPSG:4326"), "EPSG:32717")
   e_utm <- terra::ext(r_utm)
   r_utm90 <- terra::rast(

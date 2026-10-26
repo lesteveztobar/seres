@@ -44,7 +44,8 @@ args         <- commandArgs(trailingOnly = TRUE)
 site_name    <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipucuna"
 height_steps <- if (length(args) >= 2 && nzchar(args[2])) as.numeric(strsplit(args[2], ",")[[1]]) else c(0.1, 0.25, 0.5, 1.0)
 params_file  <- if (length(args) >= 3 && nzchar(args[3])) args[3] else file.path(PARAMS_DIR, "realistic.rds")
-params_tag   <- tools::file_path_sans_ext(basename(params_file))
+out_suffix   <- if (length(args) >= 4 && nzchar(args[4])) args[4] else ""
+params_tag   <- paste0(tools::file_path_sans_ext(basename(params_file)), out_suffix)
 
 TIMESTEPS  <- 50  # matches production run_colonization.R (RUN_TIMESTEPS, raised from 30 2026-07-24)
 SPINUP     <- 5
